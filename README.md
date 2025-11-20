@@ -8,7 +8,7 @@
 
 ```bash
 sudo apt update
-sudo apt install tesseract-ocr tesseract-ocr-jpn
+sudo apt install tesseract-ocr tesseract-ocr-jpn tesseract-ocr-eng
 ```
 
 ### Pythonパッケージのインストール
