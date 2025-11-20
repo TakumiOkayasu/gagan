@@ -1,0 +1,98 @@
+{
+  "timestamp": "2025-11-20T14:06:21",
+  "source_image": "screenshot.png",
+  "resolution": {
+    "width": 2164,
+    "height": 1556
+  },
+  "elements": [
+    {
+      "id": 0,
+      "text": "9",
+      "bbox": {
+        "x": 0,
+        "y": 0,
+        "width": 36,
+        "height": 69
+      },
+      "confidence": 0.38
+    },
+    {
+      "id": 1,
+      "text": "PC",
+      "bbox": {
+        "x": 60,
+        "y": 0,
+        "width": 67,
+        "height": 80
+      },
+      "confidence": 0.43
+    },
+    {
+      "id": 2,
+      "text": "の",
+      "bbox": {
+        "x": 158,
+        "y": 12,
+        "width": 16,
+        "height": 51
+      },
+      "confidence": 0.75
+    },
+    {
+      "id": 3,
+      "text": "の",
+      "bbox": {
+        "x": 174,
+        "y": 12,
+        "width": 47,
+        "height": 57
+      },
+      "confidence": 0.0
+    },
+    {
+      "id": 4,
+      "text": "で",
+      "bbox": {
+        "x": 228,
+        "y": 13,
+        "width": 33,
+        "height": 55
+      },
+      "confidence": 0.09
+    },
+    {
+      "id": 5,
+      "text": "©",
+      "bbox": {
+        "x": 273,
+        "y": 17,
+        "width": 7,
+        "height": 53
+      },
+      "confidence": 0.33
+    },
+    {
+      "id": 6,
+      "text": "es",
+      "bbox": {
+        "x": 300,
+        "y": 59,
+        "width": 32,
+        "height": 17
+      },
+      "confidence": 0.28
+    },
+    {
+      "id": 7,
+      "text": "SD",
+      "bbox": {
+        "x": 303,
+        "y": 16,
+        "width": 95,
+        "height": 19
+      },
+      "confidence": 0.0
+    }
+  ]
+}
