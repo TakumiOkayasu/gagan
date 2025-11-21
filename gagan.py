@@ -538,12 +538,13 @@ def main() -> int:
         description="GAGAN - 画面テスト用OCRツール"
     )
     parser.add_argument(
-        "image",
-        help="OCRを実行する画像ファイルのパス"
+        "images",
+        nargs="+",
+        help="OCRを実行する画像ファイルのパス(複数指定可)"
     )
     parser.add_argument(
         "-o", "--output",
-        help="出力JSONファイル名(デフォルト: <入力ファイル名>.ocr.json)"
+        help="出力JSONファイル名(単一ファイル時のみ有効、デフォルト: <入力ファイル名>.ocr.json)"
     )
     parser.add_argument(
         "--no-preprocessing",
@@ -588,165 +589,180 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    debug_image_path = None  # デバッグ用に保存した画像のパス
+    # 複数ファイル指定時は-oオプションを無視
+    if len(args.images) > 1 and args.output:
+        print("警告: 複数ファイル指定時は-oオプションは無視されます", file=sys.stderr)
 
-    try:
-        # 画像ファイルの読み込み
-        image_path = Path(args.image)
-        if not image_path.exists():
-            print(f"エラー: 画像ファイルが見つかりません: {args.image}", file=sys.stderr)
-            return 1
+    success_count = 0
+    error_count = 0
 
-        image = Image.open(image_path)
-        resolution = (image.width, image.height)
+    for image_file in args.images:
+        debug_image_path = None  # デバッグ用に保存した画像のパス
 
-        # 画像前処理とOCR実行
-        if args.no_preprocessing:
-            # 前処理なし: PIL ImageをOpenCV形式に変換(グレースケールのみ)
-            img_array = np.array(image)
-            if len(img_array.shape) == 3:
-                # カラー画像の場合: グレースケール化
-                img_rgb = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-                processed_image = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
+        try:
+            # 画像ファイルの読み込み
+            image_path = Path(image_file)
+            if not image_path.exists():
+                print(f"エラー: 画像ファイルが見つかりません: {image_file}", file=sys.stderr)
+                error_count += 1
+                continue
+
+            image = Image.open(image_path)
+            resolution = (image.width, image.height)
+
+            # 画像前処理とOCR実行
+            if args.no_preprocessing:
+                # 前処理なし: PIL ImageをOpenCV形式に変換(グレースケールのみ)
+                img_array = np.array(image)
+                if len(img_array.shape) == 3:
+                    # カラー画像の場合: グレースケール化
+                    img_rgb = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+                    processed_image = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
+                else:
+                    # 既にグレースケールの場合: そのまま使用
+                    processed_image = img_array
+
+                # デバッグモード: 前処理後の画像を保存
+                if args.debug:
+                    debug_image_path = image_path.with_suffix(".preprocessed.png")
+                    cv2.imwrite(str(debug_image_path), processed_image)
+                    print(f"前処理済み画像を保存しました: {debug_image_path}")
+
+                # OCR実行
+                ocr_result = execute_ocr(processed_image, args.lang)
+
+            elif args.light:
+                # 軽量モード: 二値化なし、スクリーンショット向け
+                processed_image = preprocess_image_light(image, args.detect_rotation)
+
+                # デバッグモード: 前処理後の画像を保存
+                if args.debug:
+                    debug_image_path = image_path.with_suffix(".light.png")
+                    cv2.imwrite(str(debug_image_path), processed_image)
+                    print(f"前処理済み画像を保存しました: {debug_image_path}")
+
+                # OCR実行
+                ocr_result = execute_ocr(processed_image, args.lang)
+
+            elif args.aggressive:
+                # 高精度モード: 複数の二値化手法を併用
+                print("高精度モードで処理中...")
+
+                debug_paths = []
+
+                # 適応的閾値処理
+                processed_adaptive = preprocess_image_adaptive(image, args.detect_rotation)
+                if args.debug:
+                    debug_adaptive_path = image_path.with_suffix(".adaptive.png")
+                    cv2.imwrite(str(debug_adaptive_path), processed_adaptive)
+                    debug_paths.append(debug_adaptive_path)
+                    print(f"適応的閾値処理済み画像を保存しました: {debug_adaptive_path}")
+
+                ocr_result_adaptive = execute_ocr(processed_adaptive, args.lang)
+                print(f"適応的閾値処理: {ocr_result_adaptive['total_elements']}要素")
+
+                # Otsu二値化
+                processed_otsu = preprocess_image_otsu(image, args.detect_rotation)
+                if args.debug:
+                    debug_otsu_path = image_path.with_suffix(".otsu.png")
+                    cv2.imwrite(str(debug_otsu_path), processed_otsu)
+                    debug_paths.append(debug_otsu_path)
+                    print(f"Otsu二値化済み画像を保存しました: {debug_otsu_path}")
+
+                ocr_result_otsu = execute_ocr(processed_otsu, args.lang)
+                print(f"Otsu二値化: {ocr_result_otsu['total_elements']}要素")
+
+                # 結果をマージ
+                ocr_result = merge_ocr_results(ocr_result_adaptive, ocr_result_otsu)
+
+                # 白抜き文字処理も追加
+                processed_inverted = preprocess_image_inverted(image, args.detect_rotation)
+                if args.debug:
+                    debug_inverted_path = image_path.with_suffix(".inverted.png")
+                    cv2.imwrite(str(debug_inverted_path), processed_inverted)
+                    debug_paths.append(debug_inverted_path)
+                    print(f"反転処理済み画像を保存しました: {debug_inverted_path}")
+
+                ocr_result_inverted = execute_ocr(processed_inverted, args.lang)
+                print(f"反転処理: {ocr_result_inverted['total_elements']}要素")
+
+                # 反転処理結果もマージ
+                ocr_result = merge_ocr_results(ocr_result, ocr_result_inverted)
+                print(f"マージ後: {ocr_result['total_elements']}要素")
+
+                # デバッグモード用の画像削除リストに追加
+                if args.debug:
+                    debug_image_path = debug_paths
+
+            elif args.inverted:
+                # 白抜き文字モード
+                processed_image = preprocess_image_inverted(image, args.detect_rotation)
+
+                # デバッグモード: 前処理後の画像を保存
+                if args.debug:
+                    debug_image_path = image_path.with_suffix(".inverted.png")
+                    cv2.imwrite(str(debug_image_path), processed_image)
+                    print(f"前処理済み画像を保存しました: {debug_image_path}")
+
+                # OCR実行
+                ocr_result = execute_ocr(processed_image, args.lang)
+
             else:
-                # 既にグレースケールの場合: そのまま使用
-                processed_image = img_array
+                # 通常モード: 適応的閾値処理のみ
+                processed_image = preprocess_image_adaptive(image, args.detect_rotation)
 
-            # デバッグモード: 前処理後の画像を保存
-            if args.debug:
-                debug_image_path = image_path.with_suffix(".preprocessed.png")
-                cv2.imwrite(str(debug_image_path), processed_image)
-                print(f"前処理済み画像を保存しました: {debug_image_path}")
+                # デバッグモード: 前処理後の画像を保存
+                if args.debug:
+                    debug_image_path = image_path.with_suffix(".preprocessed.png")
+                    cv2.imwrite(str(debug_image_path), processed_image)
+                    print(f"前処理済み画像を保存しました: {debug_image_path}")
 
-            # OCR実行
-            ocr_result = execute_ocr(processed_image, args.lang)
+                # OCR実行
+                ocr_result = execute_ocr(processed_image, args.lang)
 
-        elif args.light:
-            # 軽量モード: 二値化なし、スクリーンショット向け
-            processed_image = preprocess_image_light(image, args.detect_rotation)
+            # JSON変換
+            json_output = convert_to_json(
+                ocr_result,
+                image_path.name,
+                resolution
+            )
 
-            # デバッグモード: 前処理後の画像を保存
-            if args.debug:
-                debug_image_path = image_path.with_suffix(".light.png")
-                cv2.imwrite(str(debug_image_path), processed_image)
-                print(f"前処理済み画像を保存しました: {debug_image_path}")
+            # 出力ファイル名の決定
+            if args.output and len(args.images) == 1:
+                output_path = Path(args.output)
+            else:
+                output_path = image_path.with_suffix(image_path.suffix + ".ocr.json")
 
-            # OCR実行
-            ocr_result = execute_ocr(processed_image, args.lang)
+            # JSON出力
+            output_path.write_text(json_output, encoding="utf-8")
+            print(f"OCR結果を保存しました: {output_path}")
+            print(f"認識されたテキスト要素数: {ocr_result['total_elements']}")
 
-        elif args.aggressive:
-            # 高精度モード: 複数の二値化手法を併用
-            print("高精度モードで処理中...")
+            success_count += 1
 
-            debug_paths = []
+        except Exception as e:
+            print(f"エラーが発生しました ({image_file}): {e}", file=sys.stderr)
+            error_count += 1
 
-            # 適応的閾値処理
-            processed_adaptive = preprocess_image_adaptive(image, args.detect_rotation)
-            if args.debug:
-                debug_adaptive_path = image_path.with_suffix(".adaptive.png")
-                cv2.imwrite(str(debug_adaptive_path), processed_adaptive)
-                debug_paths.append(debug_adaptive_path)
-                print(f"適応的閾値処理済み画像を保存しました: {debug_adaptive_path}")
+        finally:
+            # デバッグモードで保存した前処理済み画像を削除(--keep-debug-imagesが指定されていない場合)
+            if debug_image_path and not args.keep_debug_images:
+                if isinstance(debug_image_path, list):
+                    # aggressiveモード: 複数の画像を削除
+                    for path in debug_image_path:
+                        if path.exists():
+                            path.unlink()
+                            print(f"前処理済み画像を削除しました: {path}")
+                elif debug_image_path.exists():
+                    # 通常モード: 1つの画像を削除
+                    debug_image_path.unlink()
+                    print(f"前処理済み画像を削除しました: {debug_image_path}")
 
-            ocr_result_adaptive = execute_ocr(processed_adaptive, args.lang)
-            print(f"適応的閾値処理: {ocr_result_adaptive['total_elements']}要素")
+    # 複数ファイル処理時のサマリ
+    if len(args.images) > 1:
+        print(f"\n処理完了: 成功 {success_count}件, エラー {error_count}件")
 
-            # Otsu二値化
-            processed_otsu = preprocess_image_otsu(image, args.detect_rotation)
-            if args.debug:
-                debug_otsu_path = image_path.with_suffix(".otsu.png")
-                cv2.imwrite(str(debug_otsu_path), processed_otsu)
-                debug_paths.append(debug_otsu_path)
-                print(f"Otsu二値化済み画像を保存しました: {debug_otsu_path}")
-
-            ocr_result_otsu = execute_ocr(processed_otsu, args.lang)
-            print(f"Otsu二値化: {ocr_result_otsu['total_elements']}要素")
-
-            # 結果をマージ
-            ocr_result = merge_ocr_results(ocr_result_adaptive, ocr_result_otsu)
-
-            # 白抜き文字処理も追加
-            processed_inverted = preprocess_image_inverted(image, args.detect_rotation)
-            if args.debug:
-                debug_inverted_path = image_path.with_suffix(".inverted.png")
-                cv2.imwrite(str(debug_inverted_path), processed_inverted)
-                debug_paths.append(debug_inverted_path)
-                print(f"反転処理済み画像を保存しました: {debug_inverted_path}")
-
-            ocr_result_inverted = execute_ocr(processed_inverted, args.lang)
-            print(f"反転処理: {ocr_result_inverted['total_elements']}要素")
-
-            # 反転処理結果もマージ
-            ocr_result = merge_ocr_results(ocr_result, ocr_result_inverted)
-            print(f"マージ後: {ocr_result['total_elements']}要素")
-
-            # デバッグモード用の画像削除リストに追加
-            if args.debug:
-                debug_image_path = debug_paths
-
-        elif args.inverted:
-            # 白抜き文字モード
-            processed_image = preprocess_image_inverted(image, args.detect_rotation)
-
-            # デバッグモード: 前処理後の画像を保存
-            if args.debug:
-                debug_image_path = image_path.with_suffix(".inverted.png")
-                cv2.imwrite(str(debug_image_path), processed_image)
-                print(f"前処理済み画像を保存しました: {debug_image_path}")
-
-            # OCR実行
-            ocr_result = execute_ocr(processed_image, args.lang)
-
-        else:
-            # 通常モード: 適応的閾値処理のみ
-            processed_image = preprocess_image_adaptive(image, args.detect_rotation)
-
-            # デバッグモード: 前処理後の画像を保存
-            if args.debug:
-                debug_image_path = image_path.with_suffix(".preprocessed.png")
-                cv2.imwrite(str(debug_image_path), processed_image)
-                print(f"前処理済み画像を保存しました: {debug_image_path}")
-
-            # OCR実行
-            ocr_result = execute_ocr(processed_image, args.lang)
-
-        # JSON変換
-        json_output = convert_to_json(
-            ocr_result,
-            image_path.name,
-            resolution
-        )
-
-        # 出力ファイル名の決定
-        if args.output:
-            output_path = Path(args.output)
-        else:
-            output_path = image_path.with_suffix(image_path.suffix + ".ocr.json")
-
-        # JSON出力
-        output_path.write_text(json_output, encoding="utf-8")
-        print(f"OCR結果を保存しました: {output_path}")
-        print(f"認識されたテキスト要素数: {ocr_result['total_elements']}")
-
-        return 0
-
-    except Exception as e:
-        print(f"エラーが発生しました: {e}", file=sys.stderr)
-        return 1
-
-    finally:
-        # デバッグモードで保存した前処理済み画像を削除(--keep-debug-imagesが指定されていない場合)
-        if debug_image_path and not args.keep_debug_images:
-            if isinstance(debug_image_path, list):
-                # aggressiveモード: 複数の画像を削除
-                for path in debug_image_path:
-                    if path.exists():
-                        path.unlink()
-                        print(f"前処理済み画像を削除しました: {path}")
-            elif debug_image_path.exists():
-                # 通常モード: 1つの画像を削除
-                debug_image_path.unlink()
-                print(f"前処理済み画像を削除しました: {debug_image_path}")
+    return 0 if error_count == 0 else 1
 
 
 if __name__ == "__main__":
