@@ -11,7 +11,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -19,12 +19,115 @@ import pytesseract
 from PIL import Image
 
 
-def preprocess_image_adaptive(image: Image.Image) -> np.ndarray:
+def detect_rotation(image: np.ndarray) -> float:
+    """
+    画像の回転角度を検出する。
+
+    Args:
+        image: グレースケール画像
+
+    Returns:
+        回転角度(度)
+    """
+    # エッジ検出
+    edges = cv2.Canny(image, 50, 150, apertureSize=3)
+
+    # ハフ変換で直線を検出
+    lines = cv2.HoughLines(edges, 1, np.pi / 180, 200)
+
+    if lines is None:
+        return 0.0
+
+    # 検出された直線の角度を集計
+    angles = []
+    for line in lines:
+        rho, theta = line[0]
+        angle = np.degrees(theta) - 90
+        # -45度から45度の範囲に正規化
+        if angle < -45:
+            angle += 180
+        elif angle > 45:
+            angle -= 180
+        angles.append(angle)
+
+    # 中央値を使用(外れ値に強い)
+    if angles:
+        median_angle = np.median(angles)
+        # 小さな角度は無視(誤検出対策)
+        if abs(median_angle) > 0.5:
+            return median_angle
+
+    return 0.0
+
+
+def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
+    """
+    画像を回転させる。
+
+    Args:
+        image: 入力画像
+        angle: 回転角度(度)
+
+    Returns:
+        回転後の画像
+    """
+    if abs(angle) < 0.1:
+        return image
+
+    h, w = image.shape[:2]
+    center = (w // 2, h // 2)
+
+    # 回転行列を作成
+    rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    # 回転後の画像サイズを計算
+    cos = np.abs(rotation_matrix[0, 0])
+    sin = np.abs(rotation_matrix[0, 1])
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+
+    # 回転行列の平行移動成分を調整
+    rotation_matrix[0, 2] += (new_w / 2) - center[0]
+    rotation_matrix[1, 2] += (new_h / 2) - center[1]
+
+    # 回転実行(白背景で埋める)
+    rotated = cv2.warpAffine(image, rotation_matrix, (new_w, new_h),
+                              borderMode=cv2.BORDER_CONSTANT,
+                              borderValue=255)
+
+    return rotated
+
+
+def upscale_if_needed(image: np.ndarray, min_height: int = 1000) -> tuple[np.ndarray, float]:
+    """
+    画像が小さい場合にアップスケールする。
+
+    Args:
+        image: 入力画像
+        min_height: 最小高さ(ピクセル)
+
+    Returns:
+        (アップスケール後の画像, 拡大率)
+    """
+    h, w = image.shape[:2]
+
+    if h < min_height:
+        scale = min_height / h
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        upscaled = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        return upscaled, scale
+
+    return image, 1.0
+
+
+def preprocess_image_adaptive(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
     """
     適応的閾値処理を使用した画像前処理を実行する。
 
     Args:
         image: PIL Image形式の入力画像
+        detect_rotation_flag: 回転検出を行うかどうか
 
     Returns:
         前処理済みのOpenCV形式画像(numpy配列)
@@ -41,27 +144,36 @@ def preprocess_image_adaptive(image: Image.Image) -> np.ndarray:
         # 既にグレースケールの場合: そのまま使用
         gray = img_array
 
-    # 2. 明るさの正規化(ヒストグラム均等化)
+    # 2. 回転検出と補正(オプション)
+    if detect_rotation_flag:
+        angle = detect_rotation(gray)
+        if abs(angle) > 0.5:
+            gray = rotate_image(gray, -angle)
+
+    # 3. アップスケール(小さな画像の場合)
+    gray, _ = upscale_if_needed(gray, min_height=1000)
+
+    # 4. 明るさの正規化(ヒストグラム均等化)
     normalized = cv2.equalizeHist(gray)
 
-    # 3. ガンマ補正(明るさ調整) - 色が薄い画像を強調
+    # 5. ガンマ補正(明るさ調整) - 色が薄い画像を強調
     gamma = 1.5
     inv_gamma = 1.0 / gamma
     gamma_table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
     gamma_corrected = cv2.LUT(normalized, gamma_table)
 
-    # 4. CLAHE(コントラスト強化) - より積極的なパラメータ
+    # 6. CLAHE(コントラスト強化) - より積極的なパラメータ
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     contrasted = clahe.apply(gamma_corrected)
 
-    # 5. シャープネス強化(アンシャープマスク) - より強力に
+    # 7. シャープネス強化(アンシャープマスク) - より強力に
     gaussian = cv2.GaussianBlur(contrasted, (0, 0), 2.0)
     sharpened = cv2.addWeighted(contrasted, 2.0, gaussian, -1.0, 0)
 
-    # 6. ノイズ除去(バイラテラルフィルタ) - エッジを保持しながらノイズ除去
+    # 8. ノイズ除去(バイラテラルフィルタ) - エッジを保持しながらノイズ除去
     denoised = cv2.bilateralFilter(sharpened, 5, 75, 75)
 
-    # 7. 適応的閾値処理による二値化 - より積極的なパラメータ
+    # 9. 適応的閾値処理による二値化 - より積極的なパラメータ
     binary = cv2.adaptiveThreshold(
         denoised,
         255,
@@ -71,20 +183,22 @@ def preprocess_image_adaptive(image: Image.Image) -> np.ndarray:
         3
     )
 
-    # 8. モルフォロジー処理(ノイズ除去とテキスト強調)
-    kernel = np.ones((2, 2), np.uint8)
-    morphed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    # 10. モルフォロジー処理(オープニング: 小さなノイズのみ除去)
+    # クロージングは太文字を潰す可能性があるため、オープニングを使用
+    kernel = np.ones((1, 1), np.uint8)
+    morphed = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
     return morphed
 
 
-def preprocess_image_otsu(image: Image.Image) -> np.ndarray:
+def preprocess_image_otsu(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
     """
     Otsu二値化を使用した画像前処理を実行する。
     薄いグレーの文字認識に有効。
 
     Args:
         image: PIL Image形式の入力画像
+        detect_rotation_flag: 回転検出を行うかどうか
 
     Returns:
         前処理済みのOpenCV形式画像(numpy配列)
@@ -101,28 +215,94 @@ def preprocess_image_otsu(image: Image.Image) -> np.ndarray:
         # 既にグレースケールの場合: そのまま使用
         gray = img_array
 
-    # 2. ガンマ補正(明るさ調整) - 薄い文字を強調
+    # 2. 回転検出と補正(オプション)
+    if detect_rotation_flag:
+        angle = detect_rotation(gray)
+        if abs(angle) > 0.5:
+            gray = rotate_image(gray, -angle)
+
+    # 3. アップスケール(小さな画像の場合)
+    gray, _ = upscale_if_needed(gray, min_height=1000)
+
+    # 4. ガンマ補正(明るさ調整) - 薄い文字を強調
     gamma = 1.2
     inv_gamma = 1.0 / gamma
     gamma_table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
     gamma_corrected = cv2.LUT(gray, gamma_table)
 
-    # 3. ノイズ除去(ガウシアンブラー)
+    # 5. ノイズ除去(ガウシアンブラー)
     blurred = cv2.GaussianBlur(gamma_corrected, (3, 3), 0)
 
-    # 4. Otsu二値化 - 自動で最適な閾値を決定
+    # 6. Otsu二値化 - 自動で最適な閾値を決定
     _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # 5. モルフォロジー処理(ノイズ除去)
-    kernel = np.ones((2, 2), np.uint8)
-    morphed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    # 7. モルフォロジー処理(オープニング: 小さなノイズのみ除去)
+    # クロージングは太文字を潰す可能性があるため、オープニングを使用
+    kernel = np.ones((1, 1), np.uint8)
+    morphed = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+
+    return morphed
+
+
+def preprocess_image_inverted(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
+    """
+    白抜き文字(反転テキスト)用の前処理を実行する。
+    暗い背景に白い文字がある場合に有効。
+
+    Args:
+        image: PIL Image形式の入力画像
+        detect_rotation_flag: 回転検出を行うかどうか
+
+    Returns:
+        前処理済みのOpenCV形式画像(numpy配列)
+    """
+    # PIL ImageをOpenCV形式に変換
+    img_array = np.array(image)
+
+    # 1. グレースケール変換
+    if len(img_array.shape) == 3:
+        # カラー画像の場合: BGR変換してからグレースケール化
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    else:
+        # 既にグレースケールの場合: そのまま使用
+        gray = img_array
+
+    # 2. 回転検出と補正(オプション)
+    if detect_rotation_flag:
+        angle = detect_rotation(gray)
+        if abs(angle) > 0.5:
+            gray = rotate_image(gray, -angle)
+
+    # 3. アップスケール(小さな画像の場合)
+    gray, _ = upscale_if_needed(gray, min_height=1000)
+
+    # 4. 反転(白抜き文字を黒文字に変換)
+    inverted = cv2.bitwise_not(gray)
+
+    # 5. ガンマ補正(明るさ調整)
+    gamma = 1.2
+    inv_gamma = 1.0 / gamma
+    gamma_table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+    gamma_corrected = cv2.LUT(inverted, gamma_table)
+
+    # 6. ノイズ除去
+    blurred = cv2.GaussianBlur(gamma_corrected, (3, 3), 0)
+
+    # 7. Otsu二値化
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # 8. モルフォロジー処理
+    kernel = np.ones((1, 1), np.uint8)
+    morphed = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
     return morphed
 
 
 def execute_ocr(
     image: np.ndarray,
-    lang: str = "jpn+eng"
+    lang: str = "jpn+eng",
+    psm: int = 3
 ) -> Dict[str, Any]:
     """
     Tesseract OCRを実行し、テキストと座標情報を取得する。
@@ -130,14 +310,25 @@ def execute_ocr(
     Args:
         image: 前処理済みのOpenCV形式画像
         lang: OCR言語設定(デフォルト: "jpn+eng")
+        psm: Page Segmentation Mode(デフォルト: 3 = 完全に自動)
 
     Returns:
         OCR結果を含む辞書
     """
+    # Tesseract設定
+    # PSM: Page Segmentation Mode
+    #   3 = Fully automatic page segmentation (デフォルト、画面テストに最適)
+    #   6 = Assume a single uniform block of text (単一ブロック)
+    #  11 = Sparse text (疎なテキスト)
+    # OEM: OCR Engine Mode
+    #   3 = Default, based on what is available (最新のLSTMエンジンを使用)
+    config = f"--oem 3 --psm {psm}"
+
     # OCR実行(詳細データを取得)
     ocr_data = pytesseract.image_to_data(
         image,
         lang=lang,
+        config=config,
         output_type=pytesseract.Output.DICT
     )
 
@@ -338,7 +529,17 @@ def main() -> int:
     parser.add_argument(
         "--aggressive",
         action="store_true",
-        help="高精度モード(複数の二値化手法を併用、処理時間約2倍)"
+        help="高精度モード(複数の二値化手法を併用、処理時間約3倍)"
+    )
+    parser.add_argument(
+        "--detect-rotation",
+        action="store_true",
+        help="回転検出と補正を有効化(斜めの画像に有効)"
+    )
+    parser.add_argument(
+        "--inverted",
+        action="store_true",
+        help="白抜き文字モード(暗い背景に白文字がある場合)"
     )
 
     args = parser.parse_args()
@@ -380,21 +581,25 @@ def main() -> int:
             # 高精度モード: 複数の二値化手法を併用
             print("高精度モードで処理中...")
 
+            debug_paths = []
+
             # 適応的閾値処理
-            processed_adaptive = preprocess_image_adaptive(image)
+            processed_adaptive = preprocess_image_adaptive(image, args.detect_rotation)
             if args.debug:
                 debug_adaptive_path = image_path.with_suffix(".adaptive.png")
                 cv2.imwrite(str(debug_adaptive_path), processed_adaptive)
+                debug_paths.append(debug_adaptive_path)
                 print(f"適応的閾値処理済み画像を保存しました: {debug_adaptive_path}")
 
             ocr_result_adaptive = execute_ocr(processed_adaptive, args.lang)
             print(f"適応的閾値処理: {ocr_result_adaptive['total_elements']}要素")
 
             # Otsu二値化
-            processed_otsu = preprocess_image_otsu(image)
+            processed_otsu = preprocess_image_otsu(image, args.detect_rotation)
             if args.debug:
                 debug_otsu_path = image_path.with_suffix(".otsu.png")
                 cv2.imwrite(str(debug_otsu_path), processed_otsu)
+                debug_paths.append(debug_otsu_path)
                 print(f"Otsu二値化済み画像を保存しました: {debug_otsu_path}")
 
             ocr_result_otsu = execute_ocr(processed_otsu, args.lang)
@@ -402,15 +607,42 @@ def main() -> int:
 
             # 結果をマージ
             ocr_result = merge_ocr_results(ocr_result_adaptive, ocr_result_otsu)
+
+            # 白抜き文字処理も追加
+            processed_inverted = preprocess_image_inverted(image, args.detect_rotation)
+            if args.debug:
+                debug_inverted_path = image_path.with_suffix(".inverted.png")
+                cv2.imwrite(str(debug_inverted_path), processed_inverted)
+                debug_paths.append(debug_inverted_path)
+                print(f"反転処理済み画像を保存しました: {debug_inverted_path}")
+
+            ocr_result_inverted = execute_ocr(processed_inverted, args.lang)
+            print(f"反転処理: {ocr_result_inverted['total_elements']}要素")
+
+            # 反転処理結果もマージ
+            ocr_result = merge_ocr_results(ocr_result, ocr_result_inverted)
             print(f"マージ後: {ocr_result['total_elements']}要素")
 
             # デバッグモード用の画像削除リストに追加
             if args.debug:
-                debug_image_path = [debug_adaptive_path, debug_otsu_path]
+                debug_image_path = debug_paths
+
+        elif args.inverted:
+            # 白抜き文字モード
+            processed_image = preprocess_image_inverted(image, args.detect_rotation)
+
+            # デバッグモード: 前処理後の画像を保存
+            if args.debug:
+                debug_image_path = image_path.with_suffix(".inverted.png")
+                cv2.imwrite(str(debug_image_path), processed_image)
+                print(f"前処理済み画像を保存しました: {debug_image_path}")
+
+            # OCR実行
+            ocr_result = execute_ocr(processed_image, args.lang)
 
         else:
             # 通常モード: 適応的閾値処理のみ
-            processed_image = preprocess_image_adaptive(image)
+            processed_image = preprocess_image_adaptive(image, args.detect_rotation)
 
             # デバッグモード: 前処理後の画像を保存
             if args.debug:
