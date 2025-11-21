@@ -31,36 +31,51 @@ def preprocess_image(image: Image.Image) -> np.ndarray:
     """
     # PIL ImageをOpenCV形式に変換
     img_array = np.array(image)
-    if len(img_array.shape) == 3:
-        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    else:
-        img_cv = img_array
 
     # 1. グレースケール変換
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    if len(img_array.shape) == 3:
+        # カラー画像の場合: BGR変換してからグレースケール化
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    else:
+        # 既にグレースケールの場合: そのまま使用
+        gray = img_array
 
-    # 2. 適応的閾値処理による二値化
+    # 2. 明るさの正規化(ヒストグラム均等化)
+    normalized = cv2.equalizeHist(gray)
+
+    # 3. ガンマ補正(明るさ調整) - 色が薄い画像を強調
+    gamma = 1.5
+    inv_gamma = 1.0 / gamma
+    gamma_table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+    gamma_corrected = cv2.LUT(normalized, gamma_table)
+
+    # 4. CLAHE(コントラスト強化) - より積極的なパラメータ
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    contrasted = clahe.apply(gamma_corrected)
+
+    # 5. シャープネス強化(アンシャープマスク) - より強力に
+    gaussian = cv2.GaussianBlur(contrasted, (0, 0), 2.0)
+    sharpened = cv2.addWeighted(contrasted, 2.0, gaussian, -1.0, 0)
+
+    # 6. ノイズ除去(バイラテラルフィルタ) - エッジを保持しながらノイズ除去
+    denoised = cv2.bilateralFilter(sharpened, 5, 75, 75)
+
+    # 7. 適応的閾値処理による二値化 - より積極的なパラメータ
     binary = cv2.adaptiveThreshold(
-        gray,
+        denoised,
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
-        11,
-        2
+        15,
+        3
     )
 
-    # 3. ノイズ除去(メディアンフィルタ)
-    denoised = cv2.medianBlur(binary, 3)
+    # 8. モルフォロジー処理(ノイズ除去とテキスト強調)
+    kernel = np.ones((2, 2), np.uint8)
+    morphed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-    # 4. コントラスト調整(CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    contrasted = clahe.apply(denoised)
-
-    # 5. シャープネス強化(アンシャープマスク)
-    gaussian = cv2.GaussianBlur(contrasted, (0, 0), 3)
-    sharpened = cv2.addWeighted(contrasted, 1.5, gaussian, -0.5, 0)
-
-    return sharpened
+    return morphed
 
 
 def execute_ocr(
@@ -180,6 +195,8 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    debug_image_path = None  # デバッグ用に保存した画像のパス
+
     try:
         # 画像ファイルの読み込み
         image_path = Path(args.image)
@@ -192,20 +209,23 @@ def main() -> int:
 
         # 画像前処理
         if args.no_preprocessing:
-            # 前処理なし: PIL ImageをOpenCV形式に変換
+            # 前処理なし: PIL ImageをOpenCV形式に変換(グレースケールのみ)
             img_array = np.array(image)
             if len(img_array.shape) == 3:
-                processed_image = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+                # カラー画像の場合: グレースケール化
+                img_rgb = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+                processed_image = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
             else:
+                # 既にグレースケールの場合: そのまま使用
                 processed_image = img_array
         else:
             processed_image = preprocess_image(image)
 
         # デバッグモード: 前処理後の画像を保存
         if args.debug:
-            debug_path = image_path.with_suffix(".preprocessed.png")
-            cv2.imwrite(str(debug_path), processed_image)
-            print(f"前処理済み画像を保存しました: {debug_path}")
+            debug_image_path = image_path.with_suffix(".preprocessed.png")
+            cv2.imwrite(str(debug_image_path), processed_image)
+            print(f"前処理済み画像を保存しました: {debug_image_path}")
 
         # OCR実行
         ocr_result = execute_ocr(processed_image, args.lang)
@@ -233,6 +253,12 @@ def main() -> int:
     except Exception as e:
         print(f"エラーが発生しました: {e}", file=sys.stderr)
         return 1
+
+    finally:
+        # デバッグモードで保存した前処理済み画像を削除
+        if debug_image_path and debug_image_path.exists():
+            debug_image_path.unlink()
+            print(f"前処理済み画像を削除しました: {debug_image_path}")
 
 
 if __name__ == "__main__":
