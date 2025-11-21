@@ -121,6 +121,40 @@ def upscale_if_needed(image: np.ndarray, min_height: int = 1000) -> tuple[np.nda
     return image, 1.0
 
 
+def preprocess_image_light(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
+    """
+    軽量前処理を実行する。
+    スクリーンショットなどクリアな画像に最適。二値化を行わない。
+
+    Args:
+        image: PIL Image形式の入力画像
+        detect_rotation_flag: 回転検出を行うかどうか
+
+    Returns:
+        前処理済みのOpenCV形式画像(numpy配列)
+    """
+    # PIL ImageをOpenCV形式に変換
+    img_array = np.array(image)
+
+    # 1. グレースケール変換
+    if len(img_array.shape) == 3:
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_array
+
+    # 2. 回転検出と補正(オプション)
+    if detect_rotation_flag:
+        angle = detect_rotation(gray)
+        if abs(angle) > 0.5:
+            gray = rotate_image(gray, -angle)
+
+    # 3. 軽いノイズ除去のみ(エッジを保持)
+    denoised = cv2.bilateralFilter(gray, 5, 50, 50)
+
+    return denoised
+
+
 def preprocess_image_adaptive(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
     """
     適応的閾値処理を使用した画像前処理を実行する。
@@ -527,6 +561,11 @@ def main() -> int:
         help="デバッグモード(前処理後の画像を保存)"
     )
     parser.add_argument(
+        "--light",
+        action="store_true",
+        help="軽量モード(二値化なし、スクリーンショット向け)"
+    )
+    parser.add_argument(
         "--aggressive",
         action="store_true",
         help="高精度モード(複数の二値化手法を併用、処理時間約3倍)"
@@ -540,6 +579,11 @@ def main() -> int:
         "--inverted",
         action="store_true",
         help="白抜き文字モード(暗い背景に白文字がある場合)"
+    )
+    parser.add_argument(
+        "--keep-debug-images",
+        action="store_true",
+        help="デバッグ画像を削除せず保持する(--debugと併用)"
     )
 
     args = parser.parse_args()
@@ -571,6 +615,19 @@ def main() -> int:
             # デバッグモード: 前処理後の画像を保存
             if args.debug:
                 debug_image_path = image_path.with_suffix(".preprocessed.png")
+                cv2.imwrite(str(debug_image_path), processed_image)
+                print(f"前処理済み画像を保存しました: {debug_image_path}")
+
+            # OCR実行
+            ocr_result = execute_ocr(processed_image, args.lang)
+
+        elif args.light:
+            # 軽量モード: 二値化なし、スクリーンショット向け
+            processed_image = preprocess_image_light(image, args.detect_rotation)
+
+            # デバッグモード: 前処理後の画像を保存
+            if args.debug:
+                debug_image_path = image_path.with_suffix(".light.png")
                 cv2.imwrite(str(debug_image_path), processed_image)
                 print(f"前処理済み画像を保存しました: {debug_image_path}")
 
@@ -678,8 +735,8 @@ def main() -> int:
         return 1
 
     finally:
-        # デバッグモードで保存した前処理済み画像を削除
-        if debug_image_path:
+        # デバッグモードで保存した前処理済み画像を削除(--keep-debug-imagesが指定されていない場合)
+        if debug_image_path and not args.keep_debug_images:
             if isinstance(debug_image_path, list):
                 # aggressiveモード: 複数の画像を削除
                 for path in debug_image_path:

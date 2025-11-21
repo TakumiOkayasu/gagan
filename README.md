@@ -39,6 +39,9 @@ uv run python gagan.py screenshot.png --lang jpn+eng
 # 前処理をスキップ
 uv run python gagan.py screenshot.png --no-preprocessing
 
+# 軽量モード(スクリーンショット向け、二値化なし、推奨)
+uv run python gagan.py screenshot.png --light
+
 # 高精度モード(薄いグレー文字・白抜き文字の認識向上、処理時間約3倍)
 uv run python gagan.py screenshot.png --aggressive
 
@@ -60,8 +63,12 @@ uv run python gagan.py screenshot.png --aggressive --detect-rotation --debug
 **通常モード(デフォルト)**
 - 適応的閾値処理を使用
 - 高速(約1-2秒)
-- 一般的な画面テストに最適
 - 小さな画像は自動でアップスケール(高さ1000px以上)
+
+**軽量モード(`--light`) - スクリーンショット推奨**
+- 二値化を行わず、グレースケール+軽いノイズ除去のみ
+- 文字のつぶれが少なく、ボタンの縁も保持
+- クリアなスクリーンショットに最適
 
 **高精度モード(`--aggressive`)**
 - 適応的閾値処理、Otsu二値化、反転処理の3つを併用
