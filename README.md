@@ -39,9 +39,25 @@ uv run python gagan.py screenshot.png --lang jpn+eng
 # 前処理をスキップ
 uv run python gagan.py screenshot.png --no-preprocessing
 
-# デバッグモード(前処理後の画像を保存)
+# 高精度モード(薄いグレー文字の認識向上、処理時間約2倍)
+uv run python gagan.py screenshot.png --aggressive
+
+# デバッグモード(前処理後の画像を一時保存、処理後自動削除)
 uv run python gagan.py screenshot.png --debug
 ```
+
+### 処理モード
+
+**通常モード(デフォルト)**
+- 適応的閾値処理を使用
+- 高速(約1-2秒)
+- 一般的な画面テストに最適
+
+**高精度モード(`--aggressive`)**
+- 適応的閾値処理とOtsu二値化を併用
+- 処理時間約2倍
+- 薄いグレー文字や低コントラスト文字の認識に有効
+- 2つの結果を統合し、信頼度の高い方を採用
 
 ## 出力形式
 
