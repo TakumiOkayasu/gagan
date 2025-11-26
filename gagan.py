@@ -537,12 +537,21 @@ def execute_ocr(
 
 def crop_region_with_margin(
     image: Image.Image, bbox: dict[str, int], margin: int = 10
-) -> Image.Image:
-    """境界ボックスにマージンを追加して領域を切り出す。"""
+) -> Optional[Image.Image]:
+    """境界ボックスにマージンを追加して領域を切り出す。
+
+    Returns:
+        切り出した画像。座標が不正な場合はNone。
+    """
     x1 = max(0, bbox["x"] - margin)
     y1 = max(0, bbox["y"] - margin)
     x2 = min(image.width, bbox["x"] + bbox["width"] + margin)
     y2 = min(image.height, bbox["y"] + bbox["height"] + margin)
+
+    # 座標の妥当性チェック
+    if x2 <= x1 or y2 <= y1:
+        return None
+
     return image.crop((x1, y1, x2, y2))
 
 
@@ -573,6 +582,11 @@ def retry_low_confidence_ocr(
             continue
 
         region_image = crop_region_with_margin(original_image, elem["bbox"])
+        if region_image is None:
+            # 座標が不正な場合はスキップ
+            improved_elements.append(elem)
+            continue
+
         best_result, best_confidence = elem, elem["confidence"]
 
         for method_name in preprocess_methods:
@@ -641,6 +655,11 @@ def retry_character_level_ocr(
             continue
 
         region_image = crop_region_with_margin(original_image, elem["bbox"], margin=5)
+        if region_image is None:
+            # 座標が不正な場合はスキップ
+            improved_elements.append(elem)
+            continue
+
         original_text = elem["text"]
 
         # 高解像度化 (4倍)
