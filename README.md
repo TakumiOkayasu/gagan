@@ -101,36 +101,36 @@ wget https://github.com/tesseract-ocr/tessdata_best/raw/main/jpn.traineddata
 wget https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata
 
 # インストール
-sudo mkdir -p /usr/share/tesseract-ocr/5/tessdata_best
-sudo mv jpn.traineddata eng.traineddata /usr/share/tesseract-ocr/5/tessdata_best/
+sudo mkdir -p /usr/share/tesseract-ocr/5/tessdata_best && mv jpn.traineddata eng.traineddata /usr/share/tesseract-ocr/5/tessdata_best/
 ```
 
-### 超解像モデルのインストール
+### MLモデルのインストール (超解像・テキスト検出)
 
-超解像機能を使用するには、ESPCNモデルが必要:
+`--super-resolution` や `--text-detection` オプションを使用するには、MLモデルが必要:
 
 ```bash
-# ダウンロード
+# セットアップスクリプトで一括ダウンロード (推奨)
+./setup_models.sh
+```
+
+<details>
+<summary>手動インストール</summary>
+
+**超解像モデル (ESPCN_x4.pb)**
+
+```bash
 wget https://github.com/fannymonori/TF-ESPCN/raw/master/export/ESPCN_x4.pb
-
-# インストール
-mkdir -p models
-mv ESPCN_x4.pb models/
+mkdir -p models && mv ESPCN_x4.pb models/
 ```
 
-### EASTテキスト検出モデルのインストール
-
-テキスト領域検出機能を使用するには:
+**EASTテキスト検出モデル (frozen_east_text_detection.pb)**
 
 ```bash
-# ダウンロード
-wget https://www.dropbox.com/s/r2ingd0l3zt8hxs/frozen_east_text_detection.tar.gz
-tar -xzf frozen_east_text_detection.tar.gz
-
-# インストール
-mkdir -p models
-mv frozen_east_text_detection.pb models/
+wget https://github.com/oyyd/frozen_east_text_detection.pb/raw/master/frozen_east_text_detection.pb
+mkdir -p models && mv frozen_east_text_detection.pb models/
 ```
+
+</details>
 
 ### 処理モード
 
