@@ -39,8 +39,14 @@ uv run python gagan.py screenshot.png --lang jpn+eng
 # 前処理をスキップ
 uv run python gagan.py screenshot.png --no-preprocessing
 
-# 軽量モード(スクリーンショット向け、二値化なし、推奨)
+# 軽量モード(二値化なし)
 uv run python gagan.py screenshot.png --light
+
+# スクリーンショット専用モード(推奨)
+uv run python gagan.py screenshot.png --screenshot
+
+# スクリーンショット + 最高精度モード(ダーク/ライト両対応)
+uv run python gagan.py screenshot.png --screenshot --max-accuracy
 
 # 高精度モード(薄いグレー文字・白抜き文字の認識向上、処理時間約3倍)
 uv run python gagan.py screenshot.png --aggressive
@@ -139,10 +145,16 @@ mkdir -p models && mv frozen_east_text_detection.pb models/
 - 高速(約1-2秒)
 - 小さな画像は自動でアップスケール(高さ1000px以上)
 
-**軽量モード(`--light`) - スクリーンショット推奨**
+**軽量モード(`--light`)**
 - 二値化を行わず、グレースケール+軽いノイズ除去のみ
 - 文字のつぶれが少なく、ボタンの縁も保持
-- クリアなスクリーンショットに最適
+
+**スクリーンショット専用モード(`--screenshot`) - 推奨**
+- ダークモード自動検出と反転処理
+- 小さいUI要素 (ボタンラベル等) の自動スケーリング
+- PSM 11 (スパーステキスト) をデフォルト使用
+- UI特有の誤認識補正 (OK, Cancel, File等)
+- `--aggressive` と併用で複数前処理をマージ
 
 **高精度モード(`--aggressive`)**
 - 適応的閾値処理、Otsu二値化、反転処理の3つを併用
@@ -165,15 +177,19 @@ mkdir -p models && mv frozen_east_text_detection.pb models/
 
 | 失敗ケース | 対処法 | オプション |
 |---------|--------|---------|
+| スクリーンショット全般 | スクショ専用モードを使用 | `--screenshot` |
+| ダークモードのスクショ | スクショモードで自動検出 | `--screenshot` |
 | 薄いグレーの文字が認識できない | 高精度モードを使用 | `--aggressive` |
 | 白抜き文字が認識できない | 白抜き文字モードまたは高精度モード | `--inverted` または `--aggressive` |
 | 画像が斜めになっている | 回転検出を有効化 | `--detect-rotation` |
 | 小さな文字が潰れる | 自動でアップスケール(1000px未満の画像) | (自動適用) |
 | 太文字が潰れる | モルフォロジー処理を最適化済み | (自動適用) |
 | カタカナが漢字として誤認識 | 日本語誤認識修正(デフォルトON) | (自動適用) |
+| UIラベルの誤認識 (0K→OK等) | スクショモードで自動補正 | `--screenshot` |
 | 低解像度画像の認識精度が悪い | 超解像を使用 | `--super-resolution` |
 | 疎なテキストが検出されない | テキスト領域検出を使用 | `--text-detection` |
 | 全体的に精度が低い | 最高精度モードを使用 | `--max-accuracy` |
+| スクショで最高精度が必要 | スクショ+最高精度モード | `--screenshot --max-accuracy` |
 | 処理が遅い | 高速モードを使用 | `--fast` |
 
 ## 出力形式
