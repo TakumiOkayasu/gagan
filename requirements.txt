@@ -1,4 +1,8 @@
-opencv-python>=4.8.0
+# Core dependencies
+opencv-contrib-python>=4.8.0  # opencv-pythonから変更 (超解像、テキスト検出用)
 pytesseract>=0.3.10
 Pillow>=10.0.0
 numpy>=1.24.0
+
+# Optional dependencies (for enhanced accuracy)
+janome>=0.5.0  # --post-process オプション用 (形態素解析)

@@ -91,14 +91,83 @@ def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
     rotation_matrix[1, 2] += (new_h / 2) - center[1]
 
     # 回転実行(白背景で埋める)
-    rotated = cv2.warpAffine(image, rotation_matrix, (new_w, new_h),
-                              borderMode=cv2.BORDER_CONSTANT,
-                              borderValue=255)
+    rotated = cv2.warpAffine(
+        image,
+        rotation_matrix,
+        (new_w, new_h),
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=255,
+    )
 
     return rotated
 
 
-def upscale_if_needed(image: np.ndarray, min_height: int = 1000) -> tuple[np.ndarray, float]:
+def calculate_text_density(image: np.ndarray) -> float:
+    """
+    画像内のテキスト密度を計算する。
+
+    Args:
+        image: グレースケール画像
+
+    Returns:
+        テキスト密度 (0.0-1.0)
+    """
+    # 適応的閾値処理で二値化
+    binary = cv2.adaptiveThreshold(
+        image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+    )
+
+    # 非ゼロピクセルの割合を計算
+    non_zero = cv2.countNonZero(binary)
+    total = image.shape[0] * image.shape[1]
+
+    return non_zero / total if total > 0 else 0.0
+
+
+def select_optimal_psm(image: np.ndarray) -> int:
+    """
+    画像特性に基づいて最適なPSM (Page Segmentation Mode) を選択する。
+
+    Args:
+        image: グレースケール画像
+
+    Returns:
+        最適なPSM値
+    """
+    h, w = image.shape[:2]
+    aspect_ratio = w / h if h > 0 else 1.0
+
+    # テキスト密度を計算
+    text_density = calculate_text_density(image)
+
+    # PSM選択ロジック
+    # PSM 3: Fully automatic page segmentation (デフォルト)
+    # PSM 4: Single column of text
+    # PSM 6: Single uniform block of text (UI向け)
+    # PSM 7: Single text line
+    # PSM 11: Sparse text
+    # PSM 12: Sparse text with OSD
+
+    if text_density < 0.05:
+        # 非常に疎なテキスト
+        return 11
+    elif text_density < 0.1:
+        # 疎なテキスト (アイコン付きUI等)
+        return 11
+    elif aspect_ratio > 5:
+        # 非常に横長 (単一行)
+        return 7
+    elif aspect_ratio < 0.3:
+        # 非常に縦長 (単一カラム)
+        return 4
+    else:
+        # 通常のUI/スクリーンショット
+        return 6
+
+
+def upscale_if_needed(
+    image: np.ndarray, min_height: int = 1000
+) -> tuple[np.ndarray, float]:
     """
     画像が小さい場合にアップスケールする。
 
@@ -121,7 +190,205 @@ def upscale_if_needed(image: np.ndarray, min_height: int = 1000) -> tuple[np.nda
     return image, 1.0
 
 
-def preprocess_image_light(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
+def upscale_with_super_resolution(
+    image: np.ndarray, scale: int = 4, model_name: str = "espcn"
+) -> np.ndarray:
+    """
+    超解像 (Super Resolution) によるアップスケール。
+    opencv-contrib-python の dnn_superres モジュールを使用。
+
+    Args:
+        image: 入力画像
+        scale: 拡大倍率 (2, 3, 4)
+        model_name: モデル名 (espcn, fsrcnn, lapsrn)
+
+    Returns:
+        アップスケール後の画像
+    """
+    try:
+        # dnn_superresモジュールのインポート
+        sr = cv2.dnn_superres.DnnSuperResImpl_create()
+
+        # モデルファイルのパス
+        model_paths = [
+            Path(__file__).parent / "models" / f"{model_name.upper()}_x{scale}.pb",
+            Path.home() / ".gagan" / "models" / f"{model_name.upper()}_x{scale}.pb",
+            Path(f"/usr/share/gagan/models/{model_name.upper()}_x{scale}.pb"),
+        ]
+
+        model_path = None
+        for path in model_paths:
+            if path.exists():
+                model_path = str(path)
+                break
+
+        if model_path is None:
+            print(
+                "警告: 超解像モデルが見つかりません。INTER_CUBICにフォールバック",
+                file=sys.stderr,
+            )
+            h, w = image.shape[:2]
+            return cv2.resize(
+                image, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC
+            )
+
+        sr.readModel(model_path)
+        sr.setModel(model_name.lower(), scale)
+        return sr.upsample(image)
+
+    except AttributeError:
+        print(
+            "警告: opencv-contrib-pythonが必要です。INTER_CUBICにフォールバック",
+            file=sys.stderr,
+        )
+        h, w = image.shape[:2]
+        return cv2.resize(image, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+    except Exception as e:
+        print(
+            f"警告: 超解像処理に失敗しました: {e}。INTER_CUBICにフォールバック",
+            file=sys.stderr,
+        )
+        h, w = image.shape[:2]
+        return cv2.resize(image, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+
+
+def detect_text_regions_east(
+    image: np.ndarray, confidence_threshold: float = 0.5, nms_threshold: float = 0.4
+) -> List[Dict[str, Any]]:
+    """
+    EASTテキスト検出器でテキスト領域を検出する。
+
+    Args:
+        image: 入力画像 (BGR)
+        confidence_threshold: 信頼度閾値
+        nms_threshold: Non-Maximum Suppression閾値
+
+    Returns:
+        検出されたテキスト領域のリスト
+    """
+    try:
+        # モデルファイルのパス
+        model_paths = [
+            Path(__file__).parent / "models" / "frozen_east_text_detection.pb",
+            Path.home() / ".gagan" / "models" / "frozen_east_text_detection.pb",
+            Path("/usr/share/gagan/models/frozen_east_text_detection.pb"),
+        ]
+
+        model_path = None
+        for path in model_paths:
+            if path.exists():
+                model_path = str(path)
+                break
+
+        if model_path is None:
+            print(
+                "警告: EASTモデルが見つかりません。テキスト検出をスキップ",
+                file=sys.stderr,
+            )
+            return []
+
+        # 画像サイズを32の倍数に調整
+        orig_h, orig_w = image.shape[:2]
+        new_w = (orig_w // 32) * 32
+        new_h = (orig_h // 32) * 32
+
+        if new_w == 0 or new_h == 0:
+            return []
+
+        ratio_w = orig_w / new_w
+        ratio_h = orig_h / new_h
+
+        # 画像をリサイズ
+        resized = cv2.resize(image, (new_w, new_h))
+
+        # ネットワークの読み込み
+        net = cv2.dnn.readNet(model_path)
+
+        # blobの作成
+        blob = cv2.dnn.blobFromImage(
+            resized, 1.0, (new_w, new_h), (123.68, 116.78, 103.94), True, False
+        )
+
+        net.setInput(blob)
+
+        # 出力層の取得
+        output_layers = ["feature_fusion/Conv_7/Sigmoid", "feature_fusion/concat_3"]
+        scores, geometry = net.forward(output_layers)
+
+        # 検出結果のデコード
+        boxes = []
+        confidences = []
+
+        num_rows, num_cols = scores.shape[2:4]
+        for y in range(num_rows):
+            scores_data = scores[0, 0, y]
+            x0_data = geometry[0, 0, y]
+            x1_data = geometry[0, 1, y]
+            x2_data = geometry[0, 2, y]
+            x3_data = geometry[0, 3, y]
+            angles_data = geometry[0, 4, y]
+
+            for x in range(num_cols):
+                if scores_data[x] < confidence_threshold:
+                    continue
+
+                offset_x = x * 4.0
+                offset_y = y * 4.0
+
+                angle = angles_data[x]
+                cos = np.cos(angle)
+                sin = np.sin(angle)
+
+                h = x0_data[x] + x2_data[x]
+                w = x1_data[x] + x3_data[x]
+
+                end_x = int(offset_x + (cos * x1_data[x]) + (sin * x2_data[x]))
+                end_y = int(offset_y - (sin * x1_data[x]) + (cos * x2_data[x]))
+                start_x = int(end_x - w)
+                start_y = int(end_y - h)
+
+                # 元画像の座標に変換
+                start_x = int(start_x * ratio_w)
+                start_y = int(start_y * ratio_h)
+                end_x = int(end_x * ratio_w)
+                end_y = int(end_y * ratio_h)
+
+                boxes.append([start_x, start_y, end_x, end_y])
+                confidences.append(float(scores_data[x]))
+
+        # Non-Maximum Suppression
+        if len(boxes) > 0:
+            indices = cv2.dnn.NMSBoxes(
+                [[b[0], b[1], b[2] - b[0], b[3] - b[1]] for b in boxes],
+                confidences,
+                confidence_threshold,
+                nms_threshold,
+            )
+
+            result = []
+            for i in indices.flatten() if len(indices) > 0 else []:
+                box = boxes[i]
+                result.append(
+                    {
+                        "x": max(0, box[0]),
+                        "y": max(0, box[1]),
+                        "width": box[2] - box[0],
+                        "height": box[3] - box[1],
+                        "confidence": confidences[i],
+                    }
+                )
+            return result
+
+        return []
+
+    except Exception as e:
+        print(f"警告: EASTテキスト検出に失敗しました: {e}", file=sys.stderr)
+        return []
+
+
+def preprocess_image_light(
+    image: Image.Image, detect_rotation_flag: bool = False
+) -> np.ndarray:
     """
     軽量前処理を実行する。
     スクリーンショットなどクリアな画像に最適。二値化を行わない。
@@ -155,7 +422,9 @@ def preprocess_image_light(image: Image.Image, detect_rotation_flag: bool = Fals
     return denoised
 
 
-def preprocess_image_adaptive(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
+def preprocess_image_adaptive(
+    image: Image.Image, detect_rotation_flag: bool = False
+) -> np.ndarray:
     """
     適応的閾値処理を使用した画像前処理を実行する。
 
@@ -193,7 +462,9 @@ def preprocess_image_adaptive(image: Image.Image, detect_rotation_flag: bool = F
     # 5. ガンマ補正(明るさ調整) - 色が薄い画像を強調
     gamma = 1.5
     inv_gamma = 1.0 / gamma
-    gamma_table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+    gamma_table = np.array(
+        [((i / 255.0) ** inv_gamma) * 255 for i in range(256)]
+    ).astype("uint8")
     gamma_corrected = cv2.LUT(normalized, gamma_table)
 
     # 6. CLAHE(コントラスト強化) - より積極的なパラメータ
@@ -209,12 +480,7 @@ def preprocess_image_adaptive(image: Image.Image, detect_rotation_flag: bool = F
 
     # 9. 適応的閾値処理による二値化 - より積極的なパラメータ
     binary = cv2.adaptiveThreshold(
-        denoised,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        15,
-        3
+        denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 3
     )
 
     # 10. モルフォロジー処理(オープニング: 小さなノイズのみ除去)
@@ -225,7 +491,9 @@ def preprocess_image_adaptive(image: Image.Image, detect_rotation_flag: bool = F
     return morphed
 
 
-def preprocess_image_otsu(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
+def preprocess_image_otsu(
+    image: Image.Image, detect_rotation_flag: bool = False
+) -> np.ndarray:
     """
     Otsu二値化を使用した画像前処理を実行する。
     薄いグレーの文字認識に有効。
@@ -261,7 +529,9 @@ def preprocess_image_otsu(image: Image.Image, detect_rotation_flag: bool = False
     # 4. ガンマ補正(明るさ調整) - 薄い文字を強調
     gamma = 1.2
     inv_gamma = 1.0 / gamma
-    gamma_table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+    gamma_table = np.array(
+        [((i / 255.0) ** inv_gamma) * 255 for i in range(256)]
+    ).astype("uint8")
     gamma_corrected = cv2.LUT(gray, gamma_table)
 
     # 5. ノイズ除去(ガウシアンブラー)
@@ -278,7 +548,9 @@ def preprocess_image_otsu(image: Image.Image, detect_rotation_flag: bool = False
     return morphed
 
 
-def preprocess_image_inverted(image: Image.Image, detect_rotation_flag: bool = False) -> np.ndarray:
+def preprocess_image_inverted(
+    image: Image.Image, detect_rotation_flag: bool = False
+) -> np.ndarray:
     """
     白抜き文字(反転テキスト)用の前処理を実行する。
     暗い背景に白い文字がある場合に有効。
@@ -317,7 +589,9 @@ def preprocess_image_inverted(image: Image.Image, detect_rotation_flag: bool = F
     # 5. ガンマ補正(明るさ調整)
     gamma = 1.2
     inv_gamma = 1.0 / gamma
-    gamma_table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+    gamma_table = np.array(
+        [((i / 255.0) ** inv_gamma) * 255 for i in range(256)]
+    ).astype("uint8")
     gamma_corrected = cv2.LUT(inverted, gamma_table)
 
     # 6. ノイズ除去
@@ -336,7 +610,9 @@ def preprocess_image_inverted(image: Image.Image, detect_rotation_flag: bool = F
 def execute_ocr(
     image: np.ndarray,
     lang: str = "jpn+eng",
-    psm: int = 3
+    psm: Optional[int] = None,
+    preserve_spaces: bool = True,
+    tessdata_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Tesseract OCRを実行し、テキストと座標情報を取得する。
@@ -344,26 +620,39 @@ def execute_ocr(
     Args:
         image: 前処理済みのOpenCV形式画像
         lang: OCR言語設定(デフォルト: "jpn+eng")
-        psm: Page Segmentation Mode(デフォルト: 3 = 完全に自動)
+        psm: Page Segmentation Mode(None=自動選択)
+        preserve_spaces: 単語間スペースを保持するか(デフォルト: True)
+        tessdata_dir: tessdataディレクトリ(tessdata_best用)
 
     Returns:
         OCR結果を含む辞書
     """
+    # PSM自動選択
+    if psm is None:
+        psm = select_optimal_psm(image)
+
     # Tesseract設定
     # PSM: Page Segmentation Mode
-    #   3 = Fully automatic page segmentation (デフォルト、画面テストに最適)
-    #   6 = Assume a single uniform block of text (単一ブロック)
+    #   3 = Fully automatic page segmentation
+    #   4 = Single column of text
+    #   6 = Single uniform block of text (UI向け)
+    #   7 = Single text line
     #  11 = Sparse text (疎なテキスト)
     # OEM: OCR Engine Mode
     #   3 = Default, based on what is available (最新のLSTMエンジンを使用)
-    config = f"--oem 3 --psm {psm}"
+    config_parts = ["--oem 3", f"--psm {psm}"]
+
+    if preserve_spaces:
+        config_parts.append("-c preserve_interword_spaces=1")
+
+    if tessdata_dir:
+        config_parts.append(f"--tessdata-dir {tessdata_dir}")
+
+    config = " ".join(config_parts)
 
     # OCR実行(詳細データを取得)
     ocr_data = pytesseract.image_to_data(
-        image,
-        lang=lang,
-        config=config,
-        output_type=pytesseract.Output.DICT
+        image, lang=lang, config=config, output_type=pytesseract.Output.DICT
     )
 
     # 結果を構造化
@@ -378,23 +667,22 @@ def execute_ocr(
         if not text or conf == -1:
             continue
 
-        elements.append({
-            "id": element_id,
-            "text": text,
-            "bbox": {
-                "x": int(ocr_data["left"][i]),
-                "y": int(ocr_data["top"][i]),
-                "width": int(ocr_data["width"][i]),
-                "height": int(ocr_data["height"][i])
-            },
-            "confidence": round(conf / 100.0, 2)
-        })
+        elements.append(
+            {
+                "id": element_id,
+                "text": text,
+                "bbox": {
+                    "x": int(ocr_data["left"][i]),
+                    "y": int(ocr_data["top"][i]),
+                    "width": int(ocr_data["width"][i]),
+                    "height": int(ocr_data["height"][i]),
+                },
+                "confidence": round(conf / 100.0, 2),
+            }
+        )
         element_id += 1
 
-    return {
-        "elements": elements,
-        "total_elements": element_id
-    }
+    return {"elements": elements, "total_elements": element_id}
 
 
 def calculate_iou(bbox1: Dict[str, int], bbox2: Dict[str, int]) -> float:
@@ -436,9 +724,7 @@ def calculate_iou(bbox1: Dict[str, int], bbox2: Dict[str, int]) -> float:
 
 
 def merge_ocr_results(
-    result1: Dict[str, Any],
-    result2: Dict[str, Any],
-    iou_threshold: float = 0.5
+    result1: Dict[str, Any], result2: Dict[str, Any], iou_threshold: float = 0.5
 ) -> Dict[str, Any]:
     """
     2つのOCR結果をマージする。
@@ -492,16 +778,99 @@ def merge_ocr_results(
     for i, elem in enumerate(merged_elements):
         elem["id"] = i
 
-    return {
-        "elements": merged_elements,
-        "total_elements": len(merged_elements)
+    return {"elements": merged_elements, "total_elements": len(merged_elements)}
+
+
+def correct_japanese_text(text: str) -> str:
+    """
+    日本語OCRの誤認識パターンを修正する。
+    カタカナ文脈で漢字として誤認識されやすい文字を補正。
+
+    Args:
+        text: OCRで認識されたテキスト
+
+    Returns:
+        修正後のテキスト
+    """
+    # 漢字 → カタカナの誤認識パターン
+    # (カタカナ文脈でのみ修正)
+    corrections = {
+        "一": "ー",  # 漢数字の一 vs 長音符
+        "口": "ロ",  # 漢字の口 vs カタカナのロ
+        "力": "カ",  # 漢字の力 vs カタカナのカ
+        "工": "エ",  # 漢字の工 vs カタカナのエ
+        "夕": "タ",  # 漢字の夕 vs カタカナのタ
+        "二": "ニ",  # 漢数字の二 vs カタカナのニ
+        "八": "ハ",  # 漢数字の八 vs カタカナのハ
     }
+
+    def is_katakana(char: str) -> bool:
+        """文字がカタカナかどうか判定"""
+        if not char:
+            return False
+        code = ord(char)
+        # カタカナ: U+30A0-U+30FF、半角カタカナ: U+FF65-U+FF9F
+        return (0x30A0 <= code <= 0x30FF) or (0xFF65 <= code <= 0xFF9F)
+
+    chars = list(text)
+    result = []
+
+    for i, char in enumerate(chars):
+        if char in corrections:
+            prev_char = chars[i - 1] if i > 0 else ""
+            next_char = chars[i + 1] if i < len(chars) - 1 else ""
+
+            # 前後の文字がカタカナなら修正
+            if is_katakana(prev_char) or is_katakana(next_char):
+                result.append(corrections[char])
+            else:
+                result.append(char)
+        else:
+            result.append(char)
+
+    return "".join(result)
+
+
+def filter_by_confidence(
+    elements: List[Dict[str, Any]], min_confidence: float = 0.3
+) -> List[Dict[str, Any]]:
+    """
+    信頼度に基づいて要素をフィルタリングする。
+    短いテキストには高い信頼度を要求。
+
+    Args:
+        elements: OCR結果の要素リスト
+        min_confidence: 最小信頼度 (デフォルト: 0.3)
+
+    Returns:
+        フィルタリング後の要素リスト
+    """
+    filtered = []
+
+    for elem in elements:
+        conf = elem["confidence"]
+        text = elem["text"]
+        text_len = len(text)
+
+        # 短いテキストは高い信頼度を要求
+        if text_len <= 1:
+            required_conf = min_confidence * 1.5
+        elif text_len <= 2:
+            required_conf = min_confidence * 1.2
+        else:
+            required_conf = min_confidence
+
+        if conf >= required_conf:
+            filtered.append(elem)
+        # 長いテキストは多少信頼度が低くても許容
+        elif text_len >= 5 and conf >= min_confidence * 0.8:
+            filtered.append(elem)
+
+    return filtered
 
 
 def convert_to_json(
-    ocr_result: Dict[str, Any],
-    source_image: str,
-    resolution: tuple[int, int]
+    ocr_result: Dict[str, Any], source_image: str, resolution: tuple[int, int]
 ) -> str:
     """
     OCR結果をJSON形式に変換する。
@@ -517,11 +886,8 @@ def convert_to_json(
     output_data = {
         "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "source_image": source_image,
-        "resolution": {
-            "width": resolution[0],
-            "height": resolution[1]
-        },
-        "elements": ocr_result["elements"]
+        "resolution": {"width": resolution[0], "height": resolution[1]},
+        "elements": ocr_result["elements"],
     }
 
     return json.dumps(output_data, ensure_ascii=False, indent=2)
@@ -534,60 +900,114 @@ def main() -> int:
     Returns:
         終了コード(0: 成功, 1: エラー)
     """
-    parser = argparse.ArgumentParser(
-        description="GAGAN - 画面テスト用OCRツール"
+    parser = argparse.ArgumentParser(description="GAGAN - 画面テスト用OCRツール")
+    parser.add_argument(
+        "images", nargs="+", help="OCRを実行する画像ファイルのパス(複数指定可)"
     )
     parser.add_argument(
-        "images",
-        nargs="+",
-        help="OCRを実行する画像ファイルのパス(複数指定可)"
+        "-o",
+        "--output",
+        help="出力JSONファイル名(単一ファイル時のみ有効、デフォルト: <入力ファイル名>.ocr.json)",
     )
     parser.add_argument(
-        "-o", "--output",
-        help="出力JSONファイル名(単一ファイル時のみ有効、デフォルト: <入力ファイル名>.ocr.json)"
+        "--no-preprocessing", action="store_true", help="画像前処理をスキップする"
     )
     parser.add_argument(
-        "--no-preprocessing",
-        action="store_true",
-        help="画像前処理をスキップする"
+        "--lang", default="jpn+eng", help="OCR言語設定(デフォルト: jpn+eng)"
     )
     parser.add_argument(
-        "--lang",
-        default="jpn+eng",
-        help="OCR言語設定(デフォルト: jpn+eng)"
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="デバッグモード(前処理後の画像を保存)"
+        "--debug", action="store_true", help="デバッグモード(前処理後の画像を保存)"
     )
     parser.add_argument(
         "--light",
         action="store_true",
-        help="軽量モード(二値化なし、スクリーンショット向け)"
+        help="軽量モード(二値化なし、スクリーンショット向け)",
     )
     parser.add_argument(
         "--aggressive",
         action="store_true",
-        help="高精度モード(複数の二値化手法を併用、処理時間約3倍)"
+        help="高精度モード(複数の二値化手法を併用、処理時間約3倍)",
     )
     parser.add_argument(
         "--detect-rotation",
         action="store_true",
-        help="回転検出と補正を有効化(斜めの画像に有効)"
+        help="回転検出と補正を有効化(斜めの画像に有効)",
     )
     parser.add_argument(
         "--inverted",
         action="store_true",
-        help="白抜き文字モード(暗い背景に白文字がある場合)"
+        help="白抜き文字モード(暗い背景に白文字がある場合)",
     )
     parser.add_argument(
         "--keep-debug-images",
         action="store_true",
-        help="デバッグ画像を削除せず保持する(--debugと併用)"
+        help="デバッグ画像を削除せず保持する(--debugと併用)",
+    )
+
+    # Phase 1: 精度向上オプション
+    parser.add_argument(
+        "--fast", action="store_true", help="高速モード(精度向上機能をOFF、従来互換)"
+    )
+    parser.add_argument(
+        "--psm",
+        type=str,
+        default="auto",
+        help="Page Segmentation Mode (auto/3/4/6/7/11等、デフォルト: auto)",
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.3,
+        help="最小信頼度フィルタ (0.0-1.0、デフォルト: 0.3)",
+    )
+    parser.add_argument(
+        "--no-japanese-correct", action="store_true", help="日本語誤認識修正を無効化"
+    )
+
+    # Phase 2: 高精度オプション
+    parser.add_argument(
+        "--best", action="store_true", help="tessdata_best (高精度訓練データ) を使用"
+    )
+    parser.add_argument("--tessdata-dir", type=str, help="tessdataディレクトリを指定")
+    parser.add_argument(
+        "--post-process",
+        action="store_true",
+        help="形態素解析による後処理を有効化 (要: janome)",
+    )
+
+    # Phase 3: 高度なオプション
+    parser.add_argument(
+        "--super-resolution",
+        action="store_true",
+        help="超解像によるアップスケール (要: opencv-contrib-python)",
+    )
+    parser.add_argument(
+        "--text-detection",
+        action="store_true",
+        help="EASTテキスト領域検出 (要: モデルファイル)",
+    )
+
+    # 最高精度モード
+    parser.add_argument(
+        "--max-accuracy",
+        action="store_true",
+        help="最高精度モード (--best --post-process --aggressive を有効化)",
     )
 
     args = parser.parse_args()
+
+    # --max-accuracyの展開
+    if args.max_accuracy:
+        args.best = True
+        args.post_process = True
+        args.aggressive = True
+
+    # --fastの処理
+    if args.fast:
+        args.min_confidence = 0.0
+        args.no_japanese_correct = True
+        if args.psm == "auto":
+            args.psm = "3"  # 従来のデフォルト
 
     # 複数ファイル指定時は-oオプションを無視
     if len(args.images) > 1 and args.output:
@@ -603,15 +1023,122 @@ def main() -> int:
             # 画像ファイルの読み込み
             image_path = Path(image_file)
             if not image_path.exists():
-                print(f"エラー: 画像ファイルが見つかりません: {image_file}", file=sys.stderr)
+                print(
+                    f"エラー: 画像ファイルが見つかりません: {image_file}",
+                    file=sys.stderr,
+                )
                 error_count += 1
                 continue
 
             image = Image.open(image_path)
             resolution = (image.width, image.height)
 
+            # PSM設定
+            psm = None if args.psm == "auto" else int(args.psm)
+
+            # tessdata_dir設定
+            tessdata_dir = args.tessdata_dir
+            if args.best and not tessdata_dir:
+                # tessdata_bestのデフォルトパス
+                tessdata_best_paths = [
+                    "/usr/share/tesseract-ocr/5/tessdata_best",
+                    "/usr/share/tesseract-ocr/4.00/tessdata_best",
+                    "/usr/local/share/tessdata_best",
+                ]
+                for path in tessdata_best_paths:
+                    if Path(path).exists():
+                        tessdata_dir = path
+                        break
+                if not tessdata_dir:
+                    print(
+                        "警告: tessdata_bestが見つかりません。標準tessdataを使用します",
+                        file=sys.stderr,
+                    )
+
+            # 超解像による前処理 (Phase 3)
+            if args.super_resolution:
+                img_array = np.array(image)
+                if len(img_array.shape) == 3:
+                    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+                else:
+                    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+
+                upscaled = upscale_with_super_resolution(
+                    img_bgr, scale=4, model_name="espcn"
+                )
+                image = Image.fromarray(cv2.cvtColor(upscaled, cv2.COLOR_BGR2RGB))
+                print(f"超解像適用: {resolution} -> ({image.width}, {image.height})")
+
+            # テキスト領域検出モード (Phase 3)
+            if args.text_detection:
+                img_array = np.array(image)
+                if len(img_array.shape) == 3:
+                    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+                else:
+                    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+
+                text_regions = detect_text_regions_east(img_bgr)
+
+                if text_regions:
+                    print(f"テキスト領域検出: {len(text_regions)}領域")
+
+                    # 各領域ごとにOCRを実行
+                    all_elements = []
+                    element_id = 0
+
+                    for region in text_regions:
+                        # 領域を切り出し
+                        x, y = region["x"], region["y"]
+                        w, h = region["width"], region["height"]
+
+                        # マージンを追加
+                        margin = 5
+                        x1 = max(0, x - margin)
+                        y1 = max(0, y - margin)
+                        x2 = min(image.width, x + w + margin)
+                        y2 = min(image.height, y + h + margin)
+
+                        region_image = image.crop((x1, y1, x2, y2))
+
+                        # 前処理
+                        if args.light:
+                            processed = preprocess_image_light(
+                                region_image, args.detect_rotation
+                            )
+                        else:
+                            processed = preprocess_image_adaptive(
+                                region_image, args.detect_rotation
+                            )
+
+                        # OCR実行 (PSM 7: 単一行)
+                        region_result = execute_ocr(
+                            processed, args.lang, psm=7, tessdata_dir=tessdata_dir
+                        )
+
+                        # 座標を元画像の座標に変換
+                        for elem in region_result["elements"]:
+                            elem["id"] = element_id
+                            elem["bbox"]["x"] += x1
+                            elem["bbox"]["y"] += y1
+                            all_elements.append(elem)
+                            element_id += 1
+
+                    ocr_result = {
+                        "elements": all_elements,
+                        "total_elements": len(all_elements),
+                    }
+                else:
+                    print("テキスト領域が検出されませんでした。通常モードで処理")
+                    # フォールバック: 通常処理
+                    processed_image = preprocess_image_adaptive(
+                        image, args.detect_rotation
+                    )
+                    ocr_result = execute_ocr(
+                        processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                    )
+
             # 画像前処理とOCR実行
-            if args.no_preprocessing:
+            elif args.no_preprocessing:
                 # 前処理なし: PIL ImageをOpenCV形式に変換(グレースケールのみ)
                 img_array = np.array(image)
                 if len(img_array.shape) == 3:
@@ -629,7 +1156,9 @@ def main() -> int:
                     print(f"前処理済み画像を保存しました: {debug_image_path}")
 
                 # OCR実行
-                ocr_result = execute_ocr(processed_image, args.lang)
+                ocr_result = execute_ocr(
+                    processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                )
 
             elif args.light:
                 # 軽量モード: 二値化なし、スクリーンショット向け
@@ -642,7 +1171,9 @@ def main() -> int:
                     print(f"前処理済み画像を保存しました: {debug_image_path}")
 
                 # OCR実行
-                ocr_result = execute_ocr(processed_image, args.lang)
+                ocr_result = execute_ocr(
+                    processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                )
 
             elif args.aggressive:
                 # 高精度モード: 複数の二値化手法を併用
@@ -651,14 +1182,20 @@ def main() -> int:
                 debug_paths = []
 
                 # 適応的閾値処理
-                processed_adaptive = preprocess_image_adaptive(image, args.detect_rotation)
+                processed_adaptive = preprocess_image_adaptive(
+                    image, args.detect_rotation
+                )
                 if args.debug:
                     debug_adaptive_path = image_path.with_suffix(".adaptive.png")
                     cv2.imwrite(str(debug_adaptive_path), processed_adaptive)
                     debug_paths.append(debug_adaptive_path)
-                    print(f"適応的閾値処理済み画像を保存しました: {debug_adaptive_path}")
+                    print(
+                        f"適応的閾値処理済み画像を保存しました: {debug_adaptive_path}"
+                    )
 
-                ocr_result_adaptive = execute_ocr(processed_adaptive, args.lang)
+                ocr_result_adaptive = execute_ocr(
+                    processed_adaptive, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                )
                 print(f"適応的閾値処理: {ocr_result_adaptive['total_elements']}要素")
 
                 # Otsu二値化
@@ -669,21 +1206,27 @@ def main() -> int:
                     debug_paths.append(debug_otsu_path)
                     print(f"Otsu二値化済み画像を保存しました: {debug_otsu_path}")
 
-                ocr_result_otsu = execute_ocr(processed_otsu, args.lang)
+                ocr_result_otsu = execute_ocr(
+                    processed_otsu, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                )
                 print(f"Otsu二値化: {ocr_result_otsu['total_elements']}要素")
 
                 # 結果をマージ
                 ocr_result = merge_ocr_results(ocr_result_adaptive, ocr_result_otsu)
 
                 # 白抜き文字処理も追加
-                processed_inverted = preprocess_image_inverted(image, args.detect_rotation)
+                processed_inverted = preprocess_image_inverted(
+                    image, args.detect_rotation
+                )
                 if args.debug:
                     debug_inverted_path = image_path.with_suffix(".inverted.png")
                     cv2.imwrite(str(debug_inverted_path), processed_inverted)
                     debug_paths.append(debug_inverted_path)
                     print(f"反転処理済み画像を保存しました: {debug_inverted_path}")
 
-                ocr_result_inverted = execute_ocr(processed_inverted, args.lang)
+                ocr_result_inverted = execute_ocr(
+                    processed_inverted, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                )
                 print(f"反転処理: {ocr_result_inverted['total_elements']}要素")
 
                 # 反転処理結果もマージ
@@ -705,7 +1248,9 @@ def main() -> int:
                     print(f"前処理済み画像を保存しました: {debug_image_path}")
 
                 # OCR実行
-                ocr_result = execute_ocr(processed_image, args.lang)
+                ocr_result = execute_ocr(
+                    processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                )
 
             else:
                 # 通常モード: 適応的閾値処理のみ
@@ -718,14 +1263,54 @@ def main() -> int:
                     print(f"前処理済み画像を保存しました: {debug_image_path}")
 
                 # OCR実行
-                ocr_result = execute_ocr(processed_image, args.lang)
+                ocr_result = execute_ocr(
+                    processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                )
+
+            # 後処理: 日本語誤認識修正
+            if not args.no_japanese_correct:
+                for elem in ocr_result["elements"]:
+                    elem["text"] = correct_japanese_text(elem["text"])
+
+            # 後処理: 信頼度フィルタリング
+            if args.min_confidence > 0:
+                original_count = len(ocr_result["elements"])
+                ocr_result["elements"] = filter_by_confidence(
+                    ocr_result["elements"], args.min_confidence
+                )
+                ocr_result["total_elements"] = len(ocr_result["elements"])
+                filtered_count = original_count - ocr_result["total_elements"]
+                if filtered_count > 0 and args.debug:
+                    print(f"信頼度フィルタ: {filtered_count}要素を除外")
+
+            # 後処理: 形態素解析 (Janome)
+            if args.post_process:
+                try:
+                    from janome.tokenizer import Tokenizer
+
+                    tokenizer = Tokenizer()
+
+                    for elem in ocr_result["elements"]:
+                        text = elem["text"]
+                        # 形態素解析で文脈を確認し、誤認識を修正
+                        tokens = list(tokenizer.tokenize(text))
+                        corrected_parts = []
+                        for token in tokens:
+                            word = token.surface
+                            pos = token.part_of_speech.split(",")[0]
+                            # 名詞でカタカナっぽいのに漢字が混ざっている場合は補正
+                            if pos == "名詞":
+                                word = correct_japanese_text(word)
+                            corrected_parts.append(word)
+                        elem["text"] = "".join(corrected_parts)
+                except ImportError:
+                    print(
+                        "警告: janomeがインストールされていません。--post-processは無視されます",
+                        file=sys.stderr,
+                    )
 
             # JSON変換
-            json_output = convert_to_json(
-                ocr_result,
-                image_path.name,
-                resolution
-            )
+            json_output = convert_to_json(ocr_result, image_path.name, resolution)
 
             # 出力ファイル名の決定
             if args.output and len(args.images) == 1:
