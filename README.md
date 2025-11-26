@@ -125,6 +125,39 @@ uv run python gagan.py *.png --screenshot --aggressive --parallel
 - 低信頼度要素の再OCR (ThreadPoolExecutor)
 - 文字単位再OCR (ThreadPoolExecutor)
 
+### OCRエンジン選択
+
+```bash
+# デフォルト: Tesseract OCR
+uv run python gagan.py screenshot.png
+
+# PaddleOCR を使用 (高速・高精度、GPU対応)
+uv run python gagan.py screenshot.png --engine paddleocr
+
+# ベンチマークモード (TesseractとPaddleOCRを比較)
+uv run python gagan.py screenshot.png --benchmark
+
+# スクリーンショットモードでベンチマーク
+uv run python gagan.py screenshot.png --screenshot --benchmark
+```
+
+**エンジン比較:**
+
+| エンジン | 特徴 | 推奨用途 |
+|----------|------|----------|
+| tesseract | 安定、軽量、CPU専用 | 一般的なOCR |
+| paddleocr | 高速、高精度、GPU対応 | 大量処理、高精度要求 |
+
+**PaddleOCRのインストール:**
+
+```bash
+# CPU版
+pip install paddlepaddle paddleocr
+
+# GPU版 (CUDA 11.x)
+pip install paddlepaddle-gpu paddleocr
+```
+
 ### tessdata_bestのインストール
 
 高精度訓練データを使用するには、別途ダウンロードが必要:

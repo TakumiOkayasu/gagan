@@ -9,8 +9,9 @@ Tesseract OCR + 画像前処理を使用した、画面テストのためのOCR�
 import argparse
 import json
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from multiprocessing import cpu_count
 from pathlib import Path
@@ -20,6 +21,8 @@ import cv2
 import numpy as np
 import pytesseract
 from PIL import Image
+
+# PaddleOCRは遅延インポート (オプション依存)
 
 # デフォルトのワーカー数 (CPUコア数、最大8)
 DEFAULT_WORKERS = min(cpu_count(), 8)
@@ -562,6 +565,299 @@ def execute_ocr(
         )
 
     return {"elements": elements, "total_elements": len(elements)}
+
+
+# PaddleOCRインスタンスのキャッシュ (遅延初期化)
+_paddleocr_instance: Optional[Any] = None
+
+
+def get_paddleocr_instance(lang: str = "japan") -> Any:
+    """PaddleOCRインスタンスを取得する (シングルトン)。"""
+    global _paddleocr_instance
+
+    if _paddleocr_instance is not None:
+        return _paddleocr_instance
+
+    try:
+        from paddleocr import PaddleOCR
+
+        # 言語マッピング
+        lang_map = {
+            "jpn": "japan",
+            "eng": "en",
+            "jpn+eng": "japan",  # PaddleOCRは単一言語、日本語優先
+            "chi_sim": "ch",
+            "kor": "korean",
+        }
+        paddle_lang = lang_map.get(lang, "japan")
+
+        _paddleocr_instance = PaddleOCR(lang=paddle_lang)
+        return _paddleocr_instance
+
+    except ImportError:
+        print(
+            "エラー: PaddleOCRがインストールされていません。\n"
+            "インストール: pip install paddlepaddle paddleocr",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def execute_ocr_paddleocr(
+    image: np.ndarray,
+    lang: str = "jpn+eng",
+) -> dict[str, Any]:
+    """PaddleOCRを使用してOCRを実行する。"""
+    # 空画像チェック
+    if image is None or image.size == 0:
+        return {"elements": [], "total_elements": 0}
+
+    h, w = image.shape[:2]
+    if h <= 0 or w <= 0:
+        return {"elements": [], "total_elements": 0}
+
+    # グレースケールの場合はBGRに変換 (PaddleOCRはカラー画像を期待)
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    ocr = get_paddleocr_instance(lang)
+
+    # 新しいAPI (predict) を試し、失敗したら旧API (ocr) を使用
+    try:
+        result = ocr.predict(image)
+    except (TypeError, AttributeError):
+        result = ocr.ocr(image)
+
+    elements = []
+
+    # 結果の解析 (新旧APIで形式が異なる)
+    if result is None:
+        return {"elements": elements, "total_elements": 0}
+
+    # 新しいAPI形式の処理
+    if hasattr(result, "__iter__") and not isinstance(result, (str, dict)):
+        for item in result:
+            # 新API: 辞書形式
+            if isinstance(item, dict) and "rec_texts" in item:
+                rec_texts = item.get("rec_texts", [])
+                rec_scores = item.get("rec_scores", [])
+                dt_polys = item.get("dt_polys", [])
+
+                for i, (text, score, poly) in enumerate(
+                    zip(rec_texts, rec_scores, dt_polys)
+                ):
+                    text = str(text).strip()
+                    if not text:
+                        continue
+
+                    # 4点座標からbboxを計算
+                    xs = [p[0] for p in poly]
+                    ys = [p[1] for p in poly]
+                    x_min, x_max = int(min(xs)), int(max(xs))
+                    y_min, y_max = int(min(ys)), int(max(ys))
+
+                    elements.append(
+                        {
+                            "id": len(elements),
+                            "text": text,
+                            "bbox": {
+                                "x": x_min,
+                                "y": y_min,
+                                "width": x_max - x_min,
+                                "height": y_max - y_min,
+                            },
+                            "confidence": round(float(score), 2),
+                        }
+                    )
+            # 旧API: リスト形式 [[[[x1,y1],...], (text, conf)], ...]
+            elif isinstance(item, list):
+                for line in item:
+                    if line is None or len(line) < 2:
+                        continue
+                    try:
+                        box, (text, confidence) = line
+                        text = str(text).strip()
+                        if not text:
+                            continue
+
+                        xs = [p[0] for p in box]
+                        ys = [p[1] for p in box]
+                        x_min, x_max = int(min(xs)), int(max(xs))
+                        y_min, y_max = int(min(ys)), int(max(ys))
+
+                        elements.append(
+                            {
+                                "id": len(elements),
+                                "text": text,
+                                "bbox": {
+                                    "x": x_min,
+                                    "y": y_min,
+                                    "width": x_max - x_min,
+                                    "height": y_max - y_min,
+                                },
+                                "confidence": round(float(confidence), 2),
+                            }
+                        )
+                    except (ValueError, TypeError):
+                        continue
+
+    return {"elements": elements, "total_elements": len(elements)}
+
+
+def execute_ocr_with_engine(
+    image: np.ndarray,
+    engine: str = "tesseract",
+    lang: str = "jpn+eng",
+    psm: Optional[int] = None,
+    preserve_spaces: bool = True,
+    tessdata_dir: Optional[str] = None,
+) -> dict[str, Any]:
+    """指定されたエンジンでOCRを実行する。"""
+    if engine == "paddleocr":
+        return execute_ocr_paddleocr(image, lang)
+    else:
+        return execute_ocr(image, lang, psm, preserve_spaces, tessdata_dir)
+
+
+# =============================================================================
+# ベンチマーク機能
+# =============================================================================
+
+
+@dataclass
+class BenchmarkResult:
+    """ベンチマーク結果を保持するデータクラス"""
+
+    engine: str
+    elapsed_time: float
+    element_count: int
+    avg_confidence: float
+    elements: list[dict[str, Any]] = field(default_factory=list)
+
+
+def run_benchmark(
+    image: np.ndarray,
+    lang: str = "jpn+eng",
+    psm: Optional[int] = None,
+    tessdata_dir: Optional[str] = None,
+) -> dict[str, BenchmarkResult]:
+    """TesseractとPaddleOCRのベンチマークを実行する。"""
+    results = {}
+
+    # Tesseract
+    print("  Tesseract OCR 実行中...")
+    start_time = time.perf_counter()
+    tesseract_result = execute_ocr(image, lang, psm, tessdata_dir=tessdata_dir)
+    tesseract_time = time.perf_counter() - start_time
+
+    tesseract_elements = tesseract_result["elements"]
+    tesseract_avg_conf = (
+        sum(e["confidence"] for e in tesseract_elements) / len(tesseract_elements)
+        if tesseract_elements
+        else 0.0
+    )
+
+    results["tesseract"] = BenchmarkResult(
+        engine="tesseract",
+        elapsed_time=tesseract_time,
+        element_count=len(tesseract_elements),
+        avg_confidence=tesseract_avg_conf,
+        elements=tesseract_elements,
+    )
+
+    # PaddleOCR
+    try:
+        print("  PaddleOCR 実行中...")
+        start_time = time.perf_counter()
+        paddle_result = execute_ocr_paddleocr(image, lang)
+        paddle_time = time.perf_counter() - start_time
+
+        paddle_elements = paddle_result["elements"]
+        paddle_avg_conf = (
+            sum(e["confidence"] for e in paddle_elements) / len(paddle_elements)
+            if paddle_elements
+            else 0.0
+        )
+
+        results["paddleocr"] = BenchmarkResult(
+            engine="paddleocr",
+            elapsed_time=paddle_time,
+            element_count=len(paddle_elements),
+            avg_confidence=paddle_avg_conf,
+            elements=paddle_elements,
+        )
+    except Exception as e:
+        print(f"  PaddleOCR エラー: {e}", file=sys.stderr)
+        results["paddleocr"] = BenchmarkResult(
+            engine="paddleocr",
+            elapsed_time=0.0,
+            element_count=0,
+            avg_confidence=0.0,
+            elements=[],
+        )
+
+    return results
+
+
+def print_benchmark_results(results: dict[str, BenchmarkResult]) -> None:
+    """ベンチマーク結果を表示する。"""
+    print("\n" + "=" * 60)
+    print("ベンチマーク結果")
+    print("=" * 60)
+
+    # テーブルヘッダー
+    print(f"{'エンジン':<15} {'処理時間':>10} {'要素数':>8} {'平均信頼度':>10}")
+    print("-" * 60)
+
+    for engine, result in results.items():
+        print(
+            f"{result.engine:<15} {result.elapsed_time:>9.3f}s {result.element_count:>8} {result.avg_confidence:>10.2%}"
+        )
+
+    print("-" * 60)
+
+    # 速度比較
+    if "tesseract" in results and "paddleocr" in results:
+        tess_time = results["tesseract"].elapsed_time
+        paddle_time = results["paddleocr"].elapsed_time
+
+        if paddle_time > 0 and tess_time > 0:
+            if paddle_time < tess_time:
+                speedup = tess_time / paddle_time
+                print(f"PaddleOCR は Tesseract より {speedup:.1f}x 高速")
+            else:
+                speedup = paddle_time / tess_time
+                print(f"Tesseract は PaddleOCR より {speedup:.1f}x 高速")
+
+    print("=" * 60 + "\n")
+
+
+def export_benchmark_json(
+    results: dict[str, BenchmarkResult],
+    source_image: str,
+    resolution: tuple[int, int],
+    output_path: Path,
+) -> None:
+    """ベンチマーク結果をJSONファイルに出力する。"""
+    output_data = {
+        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "source_image": source_image,
+        "resolution": {"width": resolution[0], "height": resolution[1]},
+        "benchmark": {
+            engine: {
+                "elapsed_time": result.elapsed_time,
+                "element_count": result.element_count,
+                "avg_confidence": result.avg_confidence,
+                "elements": result.elements,
+            }
+            for engine, result in results.items()
+        },
+    }
+
+    output_path.write_text(
+        json.dumps(output_data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"ベンチマーク結果を保存しました: {output_path}")
 
 
 # =============================================================================
@@ -1239,6 +1535,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help=f"並列処理のワーカー数 (デフォルト: {DEFAULT_WORKERS})",
     )
 
+    # OCRエンジン選択
+    parser.add_argument(
+        "--engine",
+        type=str,
+        choices=["tesseract", "paddleocr"],
+        default="tesseract",
+        help="OCRエンジン (tesseract/paddleocr、デフォルト: tesseract)",
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="ベンチマークモード (TesseractとPaddleOCRを比較)",
+    )
+
     return parser
 
 
@@ -1449,6 +1759,7 @@ def process_single_mode(
     tessdata_dir: Optional[str],
     image_path: Path,
     suffix: str,
+    engine: str = "tesseract",
 ) -> tuple[dict[str, Any], Optional[Path]]:
     """単一の前処理モードで処理する。"""
     processed = preprocess_func(image, args.detect_rotation)
@@ -1459,7 +1770,9 @@ def process_single_mode(
         cv2.imwrite(str(debug_path), processed)
         print(f"前処理済み画像を保存しました: {debug_path}")
 
-    ocr_result = execute_ocr(processed, args.lang, psm=psm, tessdata_dir=tessdata_dir)
+    ocr_result = execute_ocr_with_engine(
+        processed, engine, args.lang, psm=psm, tessdata_dir=tessdata_dir
+    )
     return ocr_result, debug_path
 
 
@@ -1681,6 +1994,7 @@ def process_image(
                 tessdata_dir,
                 image_path,
                 ".screenshot.png",
+                args.engine,
             )
 
         # 軽量モード
@@ -1693,6 +2007,7 @@ def process_image(
                 tessdata_dir,
                 image_path,
                 ".light.png",
+                args.engine,
             )
 
         # 高精度モード
@@ -1711,6 +2026,7 @@ def process_image(
                 tessdata_dir,
                 image_path,
                 ".inverted.png",
+                args.engine,
             )
 
         # 通常モード
@@ -1723,6 +2039,7 @@ def process_image(
                 tessdata_dir,
                 image_path,
                 ".preprocessed.png",
+                args.engine,
             )
 
         # 後処理
@@ -1814,6 +2131,47 @@ def main() -> int:
             error_count += 1
         else:
             valid_image_paths.append(image_path)
+
+    # ベンチマークモード
+    if args.benchmark:
+        print("ベンチマークモードで実行中...")
+        for image_path in valid_image_paths:
+            print(f"\n処理中: {image_path}")
+            try:
+                image = Image.open(image_path)
+                resolution = (image.width, image.height)
+
+                # 前処理
+                if args.screenshot:
+                    processed = preprocess_image_screenshot(image, args.detect_rotation)
+                elif args.light:
+                    processed = preprocess_image_light(image, args.detect_rotation)
+                else:
+                    processed = preprocess_image_adaptive(image, args.detect_rotation)
+
+                # PSM解決
+                psm = None
+                if args.psm != "auto":
+                    try:
+                        psm = int(args.psm)
+                    except ValueError:
+                        pass
+
+                # ベンチマーク実行
+                results = run_benchmark(processed, args.lang, psm, tessdata_dir)
+                print_benchmark_results(results)
+
+                # 結果をJSON出力
+                output_path = image_path.with_suffix(
+                    image_path.suffix + ".benchmark.json"
+                )
+                export_benchmark_json(results, image_path.name, resolution, output_path)
+
+            except Exception as e:
+                print(f"エラー ({image_path}): {e}", file=sys.stderr)
+                error_count += 1
+
+        return 0 if error_count == 0 else 1
 
     success_count = 0
 
