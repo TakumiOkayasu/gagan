@@ -81,6 +81,12 @@ uv run python gagan.py screenshot.png --psm 11    # Sparse text(疎なテキス�
 # 信頼度フィルタ(低信頼度の結果を除外)
 uv run python gagan.py screenshot.png --min-confidence 0.5
 
+# 低信頼度要素の再OCR閾値を変更(デフォルト: 0.8)
+uv run python gagan.py screenshot.png --retry-threshold 0.9
+
+# 低信頼度要素の再OCRを無効化
+uv run python gagan.py screenshot.png --no-retry
+
 # 日本語誤認識修正を無効化
 uv run python gagan.py screenshot.png --no-japanese-correct
 
@@ -173,6 +179,14 @@ mkdir -p models && mv frozen_east_text_detection.pb models/
 - スマホで斜めに撮影した画面などに有効
 - 0.5度以上の傾きがある場合に補正
 
+**低信頼度要素の再OCR (デフォルト有効)**
+- 信頼度0.8未満の要素に対して自動的に再OCRを実行
+- 該当要素の領域を切り出し、4種類の前処理 (adaptive, otsu, inverted, light) で再試行
+- 複数のPSM (7: 単一行, 8: 単一単語, 13: Raw line) で再試行
+- 最も信頼度の高い結果を採用
+- `--retry-threshold` で閾値を変更可能 (例: 0.9でより厳密に再OCR)
+- `--no-retry` で無効化可能 (処理速度優先時)
+
 ### OCR失敗ケースと対処法
 
 | 失敗ケース | 対処法 | オプション |
@@ -190,7 +204,9 @@ mkdir -p models && mv frozen_east_text_detection.pb models/
 | 疎なテキストが検出されない | テキスト領域検出を使用 | `--text-detection` |
 | 全体的に精度が低い | 最高精度モードを使用 | `--max-accuracy` |
 | スクショで最高精度が必要 | スクショ+最高精度モード | `--screenshot --max-accuracy` |
+| 信頼度の低い結果が多い | 再OCR閾値を上げる | `--retry-threshold 0.9` |
 | 処理が遅い | 高速モードを使用 | `--fast` |
+| 処理が遅い (再OCR無効化) | 再OCRをスキップ | `--no-retry` |
 
 ## 出力形式
 

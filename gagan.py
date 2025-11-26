@@ -772,6 +772,109 @@ def execute_ocr(
     return {"elements": elements, "total_elements": element_id}
 
 
+def retry_low_confidence_ocr(
+    original_image: Image.Image,
+    ocr_result: Dict[str, Any],
+    confidence_threshold: float = 0.8,
+    lang: str = "jpn+eng",
+    tessdata_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    信頼度が低い要素に対して、異なる前処理で再OCRを実行する。
+
+    Args:
+        original_image: 元のPIL Image
+        ocr_result: 初回OCRの結果
+        confidence_threshold: 再OCRを実行する信頼度閾値
+        lang: OCR言語設定
+        tessdata_dir: tessdataディレクトリ
+
+    Returns:
+        改善されたOCR結果
+    """
+    low_confidence_elements = [
+        elem
+        for elem in ocr_result["elements"]
+        if elem["confidence"] < confidence_threshold
+    ]
+
+    if not low_confidence_elements:
+        return ocr_result
+
+    print(f"低信頼度要素 {len(low_confidence_elements)}件に対して再OCR実行中...")
+
+    # 異なる前処理手法のリスト
+    preprocess_methods = [
+        ("adaptive", preprocess_image_adaptive),
+        ("otsu", preprocess_image_otsu),
+        ("inverted", preprocess_image_inverted),
+        ("light", preprocess_image_light),
+    ]
+
+    improved_elements = []
+
+    for elem in ocr_result["elements"]:
+        if elem["confidence"] >= confidence_threshold:
+            improved_elements.append(elem)
+            continue
+
+        bbox = elem["bbox"]
+        # マージンを追加して領域を切り出し
+        margin = 10
+        x1 = max(0, bbox["x"] - margin)
+        y1 = max(0, bbox["y"] - margin)
+        x2 = min(original_image.width, bbox["x"] + bbox["width"] + margin)
+        y2 = min(original_image.height, bbox["y"] + bbox["height"] + margin)
+
+        region_image = original_image.crop((x1, y1, x2, y2))
+
+        best_result = elem
+        best_confidence = elem["confidence"]
+
+        # 各前処理手法で再OCRを試行
+        for method_name, preprocess_func in preprocess_methods:
+            try:
+                processed = preprocess_func(region_image, detect_rotation_flag=False)
+
+                # 小さい領域はスケールアップ
+                h, w = processed.shape[:2]
+                if h < 32:
+                    scale = 32 / h
+                    processed = cv2.resize(
+                        processed,
+                        (int(w * scale), int(h * scale)),
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+
+                # PSM 7 (単一行) または PSM 8 (単一単語) で再OCR
+                for psm in [7, 8, 13]:
+                    region_result = execute_ocr(
+                        processed, lang, psm=psm, tessdata_dir=tessdata_dir
+                    )
+
+                    for new_elem in region_result["elements"]:
+                        if new_elem["confidence"] > best_confidence:
+                            best_confidence = new_elem["confidence"]
+                            best_result = {
+                                "id": elem["id"],
+                                "text": new_elem["text"],
+                                "bbox": bbox,  # 元のbboxを保持
+                                "confidence": new_elem["confidence"],
+                            }
+            except Exception:
+                continue
+
+        improved_elements.append(best_result)
+
+        if best_confidence > elem["confidence"]:
+            print(
+                f"  改善: '{elem['text']}' ({elem['confidence']:.2f}) -> "
+                f"'{best_result['text']}' ({best_confidence:.2f})"
+            )
+
+    return {"elements": improved_elements, "total_elements": len(improved_elements)}
+
+
 def calculate_iou(bbox1: Dict[str, int], bbox2: Dict[str, int]) -> float:
     """
     2つのbounding boxのIoU (Intersection over Union)を計算する。
@@ -1091,6 +1194,17 @@ def main() -> int:
         type=float,
         default=0.3,
         help="最小信頼度フィルタ (0.0-1.0、デフォルト: 0.3)",
+    )
+    parser.add_argument(
+        "--retry-threshold",
+        type=float,
+        default=0.8,
+        help="再OCRを実行する信頼度閾値 (0.0-1.0、デフォルト: 0.8)",
+    )
+    parser.add_argument(
+        "--no-retry",
+        action="store_true",
+        help="低信頼度要素の再OCRを無効化",
     )
     parser.add_argument(
         "--no-japanese-correct", action="store_true", help="日本語誤認識修正を無効化"
@@ -1487,6 +1601,16 @@ def main() -> int:
                 # OCR実行
                 ocr_result = execute_ocr(
                     processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
+                )
+
+            # 後処理: 低信頼度要素の再OCR
+            if not args.no_retry and args.retry_threshold > 0:
+                ocr_result = retry_low_confidence_ocr(
+                    image,
+                    ocr_result,
+                    confidence_threshold=args.retry_threshold,
+                    lang=args.lang,
+                    tessdata_dir=tessdata_dir,
                 )
 
             # 後処理: UI誤認識補正 (スクリーンショットモード時)
