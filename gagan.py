@@ -102,6 +102,21 @@ def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
     return rotated
 
 
+def detect_theme(image: np.ndarray) -> str:
+    """
+    画像の平均輝度からテーマ(ダーク/ライト)を判定する。
+    スクリーンショットのダークモード検出に使用。
+
+    Args:
+        image: グレースケール画像
+
+    Returns:
+        "dark" または "light"
+    """
+    mean_brightness = np.mean(image)
+    return "dark" if mean_brightness < 128 else "light"
+
+
 def calculate_text_density(image: np.ndarray) -> float:
     """
     画像内のテキスト密度を計算する。
@@ -384,6 +399,78 @@ def detect_text_regions_east(
     except Exception as e:
         print(f"警告: EASTテキスト検出に失敗しました: {e}", file=sys.stderr)
         return []
+
+
+def upscale_small_ui_elements(
+    image: np.ndarray, min_text_height: int = 32
+) -> tuple[np.ndarray, float]:
+    """
+    小さいUI要素(ボタンラベル等)の認識精度向上のためスケーリングする。
+    Tesseractは文字高さ32px以上で精度が向上する。
+
+    Args:
+        image: 入力画像
+        min_text_height: 目標となる最小文字高さ(ピクセル)
+
+    Returns:
+        (スケール後の画像, 拡大率)
+    """
+    h, w = image.shape[:2]
+
+    # 画像が小さすぎる場合のみスケール
+    # 一般的なUI文字サイズ(12-16px)を32px以上にする
+    if h < 100:
+        scale = max(2.0, min_text_height / 12)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        upscaled = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        return upscaled, scale
+
+    return image, 1.0
+
+
+def preprocess_image_screenshot(
+    image: Image.Image, detect_rotation_flag: bool = False
+) -> np.ndarray:
+    """
+    スクリーンショット専用の前処理を実行する。
+    ダークモード自動検出、UI要素のスケーリングを含む。
+
+    Args:
+        image: PIL Image形式の入力画像
+        detect_rotation_flag: 回転検出を行うかどうか
+
+    Returns:
+        前処理済みのOpenCV形式画像(numpy配列)
+    """
+    # PIL ImageをOpenCV形式に変換
+    img_array = np.array(image)
+
+    # 1. グレースケール変換
+    if len(img_array.shape) == 3:
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_array
+
+    # 2. 回転検出と補正(オプション) - スクショでは通常不要
+    if detect_rotation_flag:
+        angle = detect_rotation(gray)
+        if abs(angle) > 0.5:
+            gray = rotate_image(gray, -angle)
+
+    # 3. ダークモード検出と自動反転
+    theme = detect_theme(gray)
+    if theme == "dark":
+        gray = cv2.bitwise_not(gray)
+
+    # 4. 小さいUI要素のスケーリング
+    gray, _ = upscale_small_ui_elements(gray)
+
+    # 5. 軽いノイズ除去のみ(エッジを保持)
+    denoised = cv2.bilateralFilter(gray, 5, 50, 50)
+
+    return denoised
 
 
 def preprocess_image_light(
@@ -781,6 +868,46 @@ def merge_ocr_results(
     return {"elements": merged_elements, "total_elements": len(merged_elements)}
 
 
+def correct_ui_text(text: str) -> str:
+    """
+    UI要素でよく発生するOCR誤認識パターンを修正する。
+    ボタンラベル、メニュー項目等に特化。
+
+    Args:
+        text: OCRで認識されたテキスト
+
+    Returns:
+        修正後のテキスト
+    """
+    # 英字UI要素の誤認識パターン (1/l/I, 0/O 等)
+    ui_corrections = {
+        "0K": "OK",
+        "Cance1": "Cancel",
+        "C1ose": "Close",
+        "Fi1e": "File",
+        "Edi七": "Edit",
+        "He1p": "Help",
+        "Vie\\/\\/": "View",
+        "Too1s": "Tools",
+        "0ptions": "Options",
+        "Sett1ngs": "Settings",
+        "App1y": "Apply",
+        "De1ete": "Delete",
+        "Se1ect": "Select",
+        "0pen": "Open",
+        "C1ear": "Clear",
+        "Ref1esh": "Refresh",
+        "Re1oad": "Reload",
+    }
+
+    result = text
+    for wrong, correct in ui_corrections.items():
+        if wrong in result:
+            result = result.replace(wrong, correct)
+
+    return result
+
+
 def correct_japanese_text(text: str) -> str:
     """
     日本語OCRの誤認識パターンを修正する。
@@ -922,6 +1049,11 @@ def main() -> int:
         "--light",
         action="store_true",
         help="軽量モード(二値化なし、スクリーンショット向け)",
+    )
+    parser.add_argument(
+        "--screenshot",
+        action="store_true",
+        help="スクリーンショット専用モード(ダークモード自動検出、UI要素スケーリング、UI誤認識補正)",
     )
     parser.add_argument(
         "--aggressive",
@@ -1160,6 +1292,27 @@ def main() -> int:
                     processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
                 )
 
+            elif args.screenshot:
+                # スクリーンショット専用モード
+                processed_image = preprocess_image_screenshot(
+                    image, args.detect_rotation
+                )
+
+                # デバッグモード: 前処理後の画像を保存
+                if args.debug:
+                    debug_image_path = image_path.with_suffix(".screenshot.png")
+                    cv2.imwrite(str(debug_image_path), processed_image)
+                    print(f"前処理済み画像を保存しました: {debug_image_path}")
+
+                # OCR実行 (PSM 11: スパーステキスト - UI向け)
+                screenshot_psm = psm if psm is not None else 11
+                ocr_result = execute_ocr(
+                    processed_image,
+                    args.lang,
+                    psm=screenshot_psm,
+                    tessdata_dir=tessdata_dir,
+                )
+
             elif args.light:
                 # 軽量モード: 二値化なし、スクリーンショット向け
                 processed_image = preprocess_image_light(image, args.detect_rotation)
@@ -1266,6 +1419,11 @@ def main() -> int:
                 ocr_result = execute_ocr(
                     processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
                 )
+
+            # 後処理: UI誤認識補正 (スクリーンショットモード時)
+            if args.screenshot:
+                for elem in ocr_result["elements"]:
+                    elem["text"] = correct_ui_text(elem["text"])
 
             # 後処理: 日本語誤認識修正
             if not args.no_japanese_correct:
