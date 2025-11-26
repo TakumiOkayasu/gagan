@@ -9,8 +9,10 @@ Tesseract OCR + 画像前処理を使用した、画面テストのためのOCR�
 import argparse
 import json
 import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
+from multiprocessing import cpu_count
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -18,6 +20,9 @@ import cv2
 import numpy as np
 import pytesseract
 from PIL import Image
+
+# デフォルトのワーカー数 (CPUコア数、最大8)
+DEFAULT_WORKERS = min(cpu_count(), 8)
 
 # =============================================================================
 # 定数・設定
@@ -584,12 +589,81 @@ def crop_region_with_margin(
     return image.crop((x1, y1, x2, y2))
 
 
+def _retry_single_element(
+    elem: dict[str, Any],
+    original_image_array: np.ndarray,
+    image_size: tuple[int, int],
+    confidence_threshold: float,
+    lang: str,
+    tessdata_dir: Optional[str],
+) -> tuple[dict[str, Any], str]:
+    """単一要素の再OCRを実行する (並列処理用)。
+
+    Returns:
+        (改善後の要素, ログメッセージ)
+    """
+    preprocess_methods = ["adaptive", "otsu", "inverted", "light"]
+    retry_psms = [7, 8, 13]
+
+    # numpy配列からPIL Imageに変換して切り出し
+    original_image = Image.fromarray(original_image_array)
+
+    # 画像サイズを設定
+    original_image._size = image_size
+
+    region_image = crop_region_with_margin(original_image, elem["bbox"])
+    if region_image is None:
+        return elem, f"  スキップ (座標不正): '{elem['text']}'"
+
+    best_result, best_confidence = elem, elem["confidence"]
+    original_confidence = elem["confidence"]
+
+    for method_name in preprocess_methods:
+        try:
+            preprocess_func = PREPROCESS_FUNCTIONS[method_name]
+            processed = preprocess_func(region_image, False)
+
+            # 小さい領域はスケールアップ
+            h, w = processed.shape[:2]
+            if h < 32 and h > 0:
+                processed = upscale_image(processed, 32 / h)
+
+            for psm in retry_psms:
+                region_result = execute_ocr(
+                    processed, lang, psm=psm, tessdata_dir=tessdata_dir
+                )
+                for new_elem in region_result["elements"]:
+                    if new_elem["confidence"] > best_confidence:
+                        best_confidence = new_elem["confidence"]
+                        best_result = {
+                            "id": elem["id"],
+                            "text": new_elem["text"],
+                            "bbox": elem["bbox"],
+                            "confidence": new_elem["confidence"],
+                        }
+        except Exception:
+            continue
+
+    # ログメッセージ生成
+    if best_confidence > original_confidence:
+        if best_confidence >= confidence_threshold:
+            log_msg = f"  改善(閾値超): '{elem['text']}' ({original_confidence:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
+        else:
+            log_msg = f"  改善(閾値未満): '{elem['text']}' ({original_confidence:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
+    else:
+        log_msg = f"  改善なし: '{elem['text']}' ({original_confidence:.2f})"
+
+    return best_result, log_msg
+
+
 def retry_low_confidence_ocr(
     original_image: Image.Image,
     ocr_result: dict[str, Any],
     confidence_threshold: float = 0.8,
     lang: str = "jpn+eng",
     tessdata_dir: Optional[str] = None,
+    parallel: bool = False,
+    workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
     """信頼度が低い要素に対して、異なる前処理で再OCRを実行する。"""
     low_conf_elements = [
@@ -601,65 +675,98 @@ def retry_low_confidence_ocr(
 
     print(f"低信頼度要素 {len(low_conf_elements)}件に対して再OCR実行中...")
 
-    improved_elements = []
-    preprocess_methods = ["adaptive", "otsu", "inverted", "light"]
-    retry_psms = [7, 8, 13]
+    # 高信頼度要素をそのまま保持
+    high_conf_elements = [
+        e for e in ocr_result["elements"] if e["confidence"] >= confidence_threshold
+    ]
 
-    for elem in ocr_result["elements"]:
-        if elem["confidence"] >= confidence_threshold:
-            improved_elements.append(elem)
-            continue
+    # PIL ImageをNumPy配列に変換
+    image_array = np.array(original_image)
+    image_size = (original_image.width, original_image.height)
 
-        region_image = crop_region_with_margin(original_image, elem["bbox"])
-        if region_image is None:
-            # 座標が不正な場合はスキップ
-            improved_elements.append(elem)
-            continue
+    if parallel and len(low_conf_elements) > 1:
+        # 並列処理
+        improved_elements = list(high_conf_elements)
+        with ThreadPoolExecutor(
+            max_workers=min(workers, len(low_conf_elements))
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _retry_single_element,
+                    elem,
+                    image_array,
+                    image_size,
+                    confidence_threshold,
+                    lang,
+                    tessdata_dir,
+                ): elem["id"]
+                for elem in low_conf_elements
+            }
 
-        best_result, best_confidence = elem, elem["confidence"]
-        original_confidence = elem["confidence"]
+            for future in as_completed(futures):
+                result, log_msg = future.result()
+                improved_elements.append(result)
+                print(log_msg)
 
-        for method_name in preprocess_methods:
-            try:
-                preprocess_func = PREPROCESS_FUNCTIONS[method_name]
-                processed = preprocess_func(region_image, False)
+        # IDでソート
+        improved_elements.sort(key=lambda x: x["id"])
+    else:
+        # 順次処理
+        improved_elements = []
+        preprocess_methods = ["adaptive", "otsu", "inverted", "light"]
+        retry_psms = [7, 8, 13]
 
-                # 小さい領域はスケールアップ
-                h, w = processed.shape[:2]
-                if h < 32:
-                    processed = upscale_image(processed, 32 / h)
-
-                for psm in retry_psms:
-                    region_result = execute_ocr(
-                        processed, lang, psm=psm, tessdata_dir=tessdata_dir
-                    )
-                    for new_elem in region_result["elements"]:
-                        # 常に最も信頼度の高い結果を採用
-                        if new_elem["confidence"] > best_confidence:
-                            best_confidence = new_elem["confidence"]
-                            best_result = {
-                                "id": elem["id"],
-                                "text": new_elem["text"],
-                                "bbox": elem["bbox"],
-                                "confidence": new_elem["confidence"],
-                            }
-            except Exception:
+        for elem in ocr_result["elements"]:
+            if elem["confidence"] >= confidence_threshold:
+                improved_elements.append(elem)
                 continue
 
-        improved_elements.append(best_result)
+            region_image = crop_region_with_margin(original_image, elem["bbox"])
+            if region_image is None:
+                improved_elements.append(elem)
+                continue
 
-        # 結果のログ出力
-        if best_confidence > original_confidence:
-            if best_confidence >= confidence_threshold:
-                print(
-                    f"  改善(閾値超): '{elem['text']}' ({original_confidence:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
-                )
+            best_result, best_confidence = elem, elem["confidence"]
+            original_confidence = elem["confidence"]
+
+            for method_name in preprocess_methods:
+                try:
+                    preprocess_func = PREPROCESS_FUNCTIONS[method_name]
+                    processed = preprocess_func(region_image, False)
+
+                    h, w = processed.shape[:2]
+                    if h < 32 and h > 0:
+                        processed = upscale_image(processed, 32 / h)
+
+                    for psm in retry_psms:
+                        region_result = execute_ocr(
+                            processed, lang, psm=psm, tessdata_dir=tessdata_dir
+                        )
+                        for new_elem in region_result["elements"]:
+                            if new_elem["confidence"] > best_confidence:
+                                best_confidence = new_elem["confidence"]
+                                best_result = {
+                                    "id": elem["id"],
+                                    "text": new_elem["text"],
+                                    "bbox": elem["bbox"],
+                                    "confidence": new_elem["confidence"],
+                                }
+                except Exception:
+                    continue
+
+            improved_elements.append(best_result)
+
+            if best_confidence > original_confidence:
+                if best_confidence >= confidence_threshold:
+                    print(
+                        f"  改善(閾値超): '{elem['text']}' ({original_confidence:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
+                    )
+                else:
+                    print(
+                        f"  改善(閾値未満): '{elem['text']}' ({original_confidence:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
+                    )
             else:
-                print(
-                    f"  改善(閾値未満): '{elem['text']}' ({original_confidence:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
-                )
-        else:
-            print(f"  改善なし: '{elem['text']}' ({original_confidence:.2f})")
+                print(f"  改善なし: '{elem['text']}' ({original_confidence:.2f})")
 
     return {"elements": improved_elements, "total_elements": len(improved_elements)}
 
@@ -669,11 +776,97 @@ def contains_suspicious_chars(text: str) -> bool:
     return any(char in SUSPICIOUS_CHARS for char in text)
 
 
+def _retry_single_char_element(
+    elem: dict[str, Any],
+    original_image_array: np.ndarray,
+    image_size: tuple[int, int],
+    lang: str,
+    tessdata_dir: Optional[str],
+) -> tuple[dict[str, Any], str]:
+    """単一要素の文字単位再OCRを実行する (並列処理用)。
+
+    Returns:
+        (改善後の要素, ログメッセージ)
+    """
+    # numpy配列からPIL Imageに変換
+    original_image = Image.fromarray(original_image_array)
+    original_image._size = image_size
+
+    region_image = crop_region_with_margin(original_image, elem["bbox"], margin=5)
+    if region_image is None:
+        return elem, f"  スキップ (座標不正): '{elem['text']}'"
+
+    original_text = elem["text"]
+    original_confidence = elem["confidence"]
+
+    # 高解像度化 (4倍)
+    img_array = np.array(region_image)
+    if len(img_array.shape) == 3:
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    else:
+        img_cv = img_array
+
+    upscaled = upscale_image(img_cv, 4)
+
+    if len(upscaled.shape) == 3:
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = upscaled
+
+    sharpened = apply_sharpening(gray)
+
+    best_text, best_confidence = original_text, original_confidence
+
+    preprocess_variants = [
+        sharpened,
+        cv2.adaptiveThreshold(
+            sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+        ),
+        cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+    ]
+
+    for processed in preprocess_variants:
+        for psm in [6, 13]:
+            try:
+                result = execute_ocr(
+                    processed, lang, psm=psm, tessdata_dir=tessdata_dir
+                )
+                for new_elem in result["elements"]:
+                    new_text, new_conf = new_elem["text"], new_elem["confidence"]
+
+                    old_count = sum(1 for c in original_text if c in SUSPICIOUS_CHARS)
+                    new_count = sum(1 for c in new_text if c in SUSPICIOUS_CHARS)
+
+                    if new_count < old_count and new_conf >= best_confidence * 0.9:
+                        best_text, best_confidence = new_text, new_conf
+                    elif new_conf > best_confidence:
+                        best_text, best_confidence = new_text, new_conf
+            except Exception:
+                continue
+
+    # ログメッセージ生成
+    if best_text != original_text:
+        log_msg = f"  文字単位改善: '{original_text}' ({original_confidence:.2f}) -> '{best_text}' ({best_confidence:.2f})"
+    elif best_confidence > original_confidence:
+        log_msg = f"  信頼度改善: '{original_text}' ({original_confidence:.2f}) -> ({best_confidence:.2f})"
+    else:
+        log_msg = f"  改善なし: '{original_text}' ({original_confidence:.2f})"
+
+    return {
+        "id": elem["id"],
+        "text": best_text,
+        "bbox": elem["bbox"],
+        "confidence": best_confidence,
+    }, log_msg
+
+
 def retry_character_level_ocr(
     original_image: Image.Image,
     ocr_result: dict[str, Any],
     lang: str = "jpn+eng",
     tessdata_dir: Optional[str] = None,
+    parallel: bool = False,
+    workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
     """誤認識しやすい文字を含む要素に対して、文字単位で再OCRを実行する。"""
     suspicious_elements = [
@@ -687,92 +880,138 @@ def retry_character_level_ocr(
         f"疑わしい文字を含む要素 {len(suspicious_elements)}件に対して文字単位再OCR実行中..."
     )
 
-    improved_elements = []
+    # 非疑わしい要素をそのまま保持
+    non_suspicious_elements = [
+        e for e in ocr_result["elements"] if not contains_suspicious_chars(e["text"])
+    ]
 
-    for elem in ocr_result["elements"]:
-        if not contains_suspicious_chars(elem["text"]):
-            improved_elements.append(elem)
-            continue
+    # PIL ImageをNumPy配列に変換
+    image_array = np.array(original_image)
+    image_size = (original_image.width, original_image.height)
 
-        region_image = crop_region_with_margin(original_image, elem["bbox"], margin=5)
-        if region_image is None:
-            # 座標が不正な場合はスキップ
-            improved_elements.append(elem)
-            continue
-
-        original_text = elem["text"]
-        original_confidence = elem["confidence"]
-
-        # 高解像度化 (4倍)
-        img_array = np.array(region_image)
-        if len(img_array.shape) == 3:
-            img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        else:
-            img_cv = img_array
-
-        upscaled = upscale_image(img_cv, 4)
-
-        if len(upscaled.shape) == 3:
-            gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = upscaled
-
-        sharpened = apply_sharpening(gray)
-
-        # 複数の前処理で試行
-        best_text, best_confidence = original_text, original_confidence
-
-        preprocess_variants = [
-            sharpened,
-            cv2.adaptiveThreshold(
-                sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-            ),
-            cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-        ]
-
-        for processed in preprocess_variants:
-            for psm in [6, 13]:
-                try:
-                    result = execute_ocr(
-                        processed, lang, psm=psm, tessdata_dir=tessdata_dir
-                    )
-                    for new_elem in result["elements"]:
-                        new_text, new_conf = new_elem["text"], new_elem["confidence"]
-
-                        old_count = sum(
-                            1 for c in original_text if c in SUSPICIOUS_CHARS
-                        )
-                        new_count = sum(1 for c in new_text if c in SUSPICIOUS_CHARS)
-
-                        # 疑わしい文字が減少し、信頼度が90%以上なら採用
-                        if new_count < old_count and new_conf >= best_confidence * 0.9:
-                            best_text, best_confidence = new_text, new_conf
-                        # または、信頼度が向上した場合は採用
-                        elif new_conf > best_confidence:
-                            best_text, best_confidence = new_text, new_conf
-                except Exception:
-                    continue
-
-        # 結果のログ出力
-        if best_text != original_text:
-            print(
-                f"  文字単位改善: '{original_text}' ({original_confidence:.2f}) -> '{best_text}' ({best_confidence:.2f})"
-            )
-        elif best_confidence > original_confidence:
-            print(
-                f"  信頼度改善: '{original_text}' ({original_confidence:.2f}) -> ({best_confidence:.2f})"
-            )
-        else:
-            print(f"  改善なし: '{original_text}' ({original_confidence:.2f})")
-
-        improved_elements.append(
-            {
-                "id": elem["id"],
-                "text": best_text,
-                "bbox": elem["bbox"],
-                "confidence": best_confidence,
+    if parallel and len(suspicious_elements) > 1:
+        # 並列処理
+        improved_elements = list(non_suspicious_elements)
+        with ThreadPoolExecutor(
+            max_workers=min(workers, len(suspicious_elements))
+        ) as executor:
+            futures = {
+                executor.submit(
+                    _retry_single_char_element,
+                    elem,
+                    image_array,
+                    image_size,
+                    lang,
+                    tessdata_dir,
+                ): elem["id"]
+                for elem in suspicious_elements
             }
-        )
+
+            for future in as_completed(futures):
+                result, log_msg = future.result()
+                improved_elements.append(result)
+                print(log_msg)
+
+        # IDでソート
+        improved_elements.sort(key=lambda x: x["id"])
+    else:
+        # 順次処理
+        improved_elements = []
+
+        for elem in ocr_result["elements"]:
+            if not contains_suspicious_chars(elem["text"]):
+                improved_elements.append(elem)
+                continue
+
+            region_image = crop_region_with_margin(
+                original_image, elem["bbox"], margin=5
+            )
+            if region_image is None:
+                improved_elements.append(elem)
+                continue
+
+            original_text = elem["text"]
+            original_confidence = elem["confidence"]
+
+            img_array_local = np.array(region_image)
+            if len(img_array_local.shape) == 3:
+                img_cv = cv2.cvtColor(img_array_local, cv2.COLOR_RGB2BGR)
+            else:
+                img_cv = img_array_local
+
+            upscaled = upscale_image(img_cv, 4)
+
+            if len(upscaled.shape) == 3:
+                gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = upscaled
+
+            sharpened = apply_sharpening(gray)
+            best_text, best_confidence = original_text, original_confidence
+
+            preprocess_variants = [
+                sharpened,
+                cv2.adaptiveThreshold(
+                    sharpened,
+                    255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY,
+                    11,
+                    2,
+                ),
+                cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[
+                    1
+                ],
+            ]
+
+            for processed in preprocess_variants:
+                for psm in [6, 13]:
+                    try:
+                        result = execute_ocr(
+                            processed, lang, psm=psm, tessdata_dir=tessdata_dir
+                        )
+                        for new_elem in result["elements"]:
+                            new_text, new_conf = (
+                                new_elem["text"],
+                                new_elem["confidence"],
+                            )
+
+                            old_count = sum(
+                                1 for c in original_text if c in SUSPICIOUS_CHARS
+                            )
+                            new_count = sum(
+                                1 for c in new_text if c in SUSPICIOUS_CHARS
+                            )
+
+                            if (
+                                new_count < old_count
+                                and new_conf >= best_confidence * 0.9
+                            ):
+                                best_text, best_confidence = new_text, new_conf
+                            elif new_conf > best_confidence:
+                                best_text, best_confidence = new_text, new_conf
+                    except Exception:
+                        continue
+
+            if best_text != original_text:
+                print(
+                    f"  文字単位改善: '{original_text}' ({original_confidence:.2f}) -> '{best_text}' ({best_confidence:.2f})"
+                )
+            elif best_confidence > original_confidence:
+                print(
+                    f"  信頼度改善: '{original_text}' ({original_confidence:.2f}) -> ({best_confidence:.2f})"
+                )
+            else:
+                print(f"  改善なし: '{original_text}' ({original_confidence:.2f})")
+
+            improved_elements.append(
+                {
+                    "id": elem["id"],
+                    "text": best_text,
+                    "bbox": elem["bbox"],
+                    "confidence": best_confidence,
+                }
+            )
 
     return {"elements": improved_elements, "total_elements": len(improved_elements)}
 
@@ -991,6 +1230,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-accuracy", action="store_true", help="最高精度モード")
 
+    # 並列処理オプション
+    parser.add_argument("--parallel", action="store_true", help="並列処理を有効化")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"並列処理のワーカー数 (デフォルト: {DEFAULT_WORKERS})",
+    )
+
     return parser
 
 
@@ -1018,35 +1266,97 @@ def resolve_tessdata_dir(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
+def _process_single_preprocess(
+    preprocess_info: tuple[str, str],
+    image_array: np.ndarray,
+    detect_rotation: bool,
+    lang: str,
+    psm: Optional[int],
+    tessdata_dir: Optional[str],
+    debug: bool,
+    image_path: Path,
+) -> tuple[str, dict[str, Any], Optional[Path]]:
+    """単一の前処理を実行する (並列処理用)。"""
+    name, suffix = preprocess_info
+    preprocess_func = PREPROCESS_FUNCTIONS[name]
+
+    # numpy配列からPIL Imageに変換
+    image = Image.fromarray(image_array)
+    processed = preprocess_func(image, detect_rotation)
+
+    debug_path = None
+    if debug:
+        debug_path = image_path.with_suffix(suffix)
+        cv2.imwrite(str(debug_path), processed)
+
+    result = execute_ocr(processed, lang, psm=psm, tessdata_dir=tessdata_dir)
+    return name, result, debug_path
+
+
 def process_with_mode_aggressive(
     image: Image.Image,
     args: argparse.Namespace,
     psm: Optional[int],
     tessdata_dir: Optional[str],
     image_path: Path,
+    parallel: bool = False,
+    workers: int = DEFAULT_WORKERS,
 ) -> tuple[dict[str, Any], Optional[list[Path]]]:
     """高精度モードで処理する。"""
     print("高精度モードで処理中...")
     debug_paths = [] if args.debug else None
 
     methods = [
-        ("adaptive", preprocess_image_adaptive, ".adaptive.png"),
-        ("otsu", preprocess_image_otsu, ".otsu.png"),
-        ("inverted", preprocess_image_inverted, ".inverted.png"),
+        ("adaptive", ".adaptive.png"),
+        ("otsu", ".otsu.png"),
+        ("inverted", ".inverted.png"),
     ]
 
-    results = []
-    for name, preprocess_func, suffix in methods:
-        processed = preprocess_func(image, args.detect_rotation)
-        if args.debug:
-            debug_path = image_path.with_suffix(suffix)
-            cv2.imwrite(str(debug_path), processed)
-            debug_paths.append(debug_path)
-            print(f"{name}処理済み画像を保存しました: {debug_path}")
+    # PIL ImageをNumPy配列に変換 (並列処理用にシリアライズ可能な形式)
+    image_array = np.array(image)
 
-        result = execute_ocr(processed, args.lang, psm=psm, tessdata_dir=tessdata_dir)
-        print(f"{name}処理: {result['total_elements']}要素")
-        results.append(result)
+    if parallel and len(methods) > 1:
+        # 並列処理
+        results = []
+        with ThreadPoolExecutor(max_workers=min(workers, len(methods))) as executor:
+            futures = {
+                executor.submit(
+                    _process_single_preprocess,
+                    method,
+                    image_array,
+                    args.detect_rotation,
+                    args.lang,
+                    psm,
+                    tessdata_dir,
+                    args.debug,
+                    image_path,
+                ): method[0]
+                for method in methods
+            }
+
+            for future in as_completed(futures):
+                name, result, debug_path = future.result()
+                print(f"{name}処理: {result['total_elements']}要素")
+                results.append(result)
+                if debug_path and debug_paths is not None:
+                    debug_paths.append(debug_path)
+    else:
+        # 順次処理
+        results = []
+        for name, suffix in methods:
+            preprocess_func = PREPROCESS_FUNCTIONS[name]
+            processed = preprocess_func(image, args.detect_rotation)
+            if args.debug:
+                debug_path = image_path.with_suffix(suffix)
+                cv2.imwrite(str(debug_path), processed)
+                debug_paths.append(debug_path)
+                print(f"{name}処理済み画像を保存しました: {debug_path}")
+
+            result = execute_ocr(
+                processed, args.lang, psm=psm, tessdata_dir=tessdata_dir
+            )
+            print(f"{name}処理: {result['total_elements']}要素")
+            results.append(result)
 
     # 結果をマージ
     merged = results[0]
@@ -1063,6 +1373,8 @@ def process_with_mode_screenshot_aggressive(
     psm: Optional[int],
     tessdata_dir: Optional[str],
     image_path: Path,
+    parallel: bool = False,
+    workers: int = DEFAULT_WORKERS,
 ) -> tuple[dict[str, Any], Optional[list[Path]]]:
     """スクリーンショット + 高精度モードで処理する。"""
     print("スクリーンショット高精度モードで処理中...")
@@ -1070,25 +1382,56 @@ def process_with_mode_screenshot_aggressive(
     screenshot_psm = psm if psm is not None else 11
 
     methods = [
-        ("screenshot", preprocess_image_screenshot, ".screenshot.png"),
-        ("light", preprocess_image_light, ".light.png"),
-        ("inverted", preprocess_image_inverted, ".inverted.png"),
+        ("screenshot", ".screenshot.png"),
+        ("light", ".light.png"),
+        ("inverted", ".inverted.png"),
     ]
 
-    results = []
-    for name, preprocess_func, suffix in methods:
-        processed = preprocess_func(image, args.detect_rotation)
-        if args.debug:
-            debug_path = image_path.with_suffix(suffix)
-            cv2.imwrite(str(debug_path), processed)
-            debug_paths.append(debug_path)
-            print(f"{name}処理済み画像を保存しました: {debug_path}")
+    # PIL ImageをNumPy配列に変換 (並列処理用)
+    image_array = np.array(image)
 
-        result = execute_ocr(
-            processed, args.lang, psm=screenshot_psm, tessdata_dir=tessdata_dir
-        )
-        print(f"{name}処理: {result['total_elements']}要素")
-        results.append(result)
+    if parallel and len(methods) > 1:
+        # 並列処理
+        results = []
+        with ThreadPoolExecutor(max_workers=min(workers, len(methods))) as executor:
+            futures = {
+                executor.submit(
+                    _process_single_preprocess,
+                    method,
+                    image_array,
+                    args.detect_rotation,
+                    args.lang,
+                    screenshot_psm,
+                    tessdata_dir,
+                    args.debug,
+                    image_path,
+                ): method[0]
+                for method in methods
+            }
+
+            for future in as_completed(futures):
+                name, result, debug_path = future.result()
+                print(f"{name}処理: {result['total_elements']}要素")
+                results.append(result)
+                if debug_path and debug_paths is not None:
+                    debug_paths.append(debug_path)
+    else:
+        # 順次処理
+        results = []
+        for name, suffix in methods:
+            preprocess_func = PREPROCESS_FUNCTIONS[name]
+            processed = preprocess_func(image, args.detect_rotation)
+            if args.debug:
+                debug_path = image_path.with_suffix(suffix)
+                cv2.imwrite(str(debug_path), processed)
+                debug_paths.append(debug_path)
+                print(f"{name}処理済み画像を保存しました: {debug_path}")
+
+            result = execute_ocr(
+                processed, args.lang, psm=screenshot_psm, tessdata_dir=tessdata_dir
+            )
+            print(f"{name}処理: {result['total_elements']}要素")
+            results.append(result)
 
     merged = results[0]
     for result in results[1:]:
@@ -1125,18 +1468,31 @@ def apply_post_processing(
     image: Image.Image,
     args: argparse.Namespace,
     tessdata_dir: Optional[str],
+    parallel: bool = False,
+    workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
     """後処理を適用する。"""
     # 低信頼度要素の再OCR
     if not args.no_retry and args.retry_threshold > 0:
         ocr_result = retry_low_confidence_ocr(
-            image, ocr_result, args.retry_threshold, args.lang, tessdata_dir
+            image,
+            ocr_result,
+            args.retry_threshold,
+            args.lang,
+            tessdata_dir,
+            parallel=parallel,
+            workers=workers,
         )
 
     # 文字単位再OCR
     if args.char_retry:
         ocr_result = retry_character_level_ocr(
-            image, ocr_result, args.lang, tessdata_dir
+            image,
+            ocr_result,
+            args.lang,
+            tessdata_dir,
+            parallel=parallel,
+            workers=workers,
         )
 
     # UI誤認識補正
@@ -1200,7 +1556,11 @@ def cleanup_debug_images(debug_image_path, keep: bool) -> None:
 
 
 def process_image(
-    image_path: Path, args: argparse.Namespace, tessdata_dir: Optional[str]
+    image_path: Path,
+    args: argparse.Namespace,
+    tessdata_dir: Optional[str],
+    parallel: bool = False,
+    workers: int = DEFAULT_WORKERS,
 ) -> bool:
     """単一の画像を処理する。"""
     debug_image_path = None
@@ -1307,7 +1667,7 @@ def process_image(
         # スクリーンショット + 高精度
         elif args.screenshot and args.aggressive:
             ocr_result, debug_image_path = process_with_mode_screenshot_aggressive(
-                image, args, psm, tessdata_dir, image_path
+                image, args, psm, tessdata_dir, image_path, parallel, workers
             )
 
         # スクリーンショットモード
@@ -1338,7 +1698,7 @@ def process_image(
         # 高精度モード
         elif args.aggressive:
             ocr_result, debug_image_path = process_with_mode_aggressive(
-                image, args, psm, tessdata_dir, image_path
+                image, args, psm, tessdata_dir, image_path, parallel, workers
             )
 
         # 白抜き文字モード
@@ -1366,7 +1726,9 @@ def process_image(
             )
 
         # 後処理
-        ocr_result = apply_post_processing(ocr_result, image, args, tessdata_dir)
+        ocr_result = apply_post_processing(
+            ocr_result, image, args, tessdata_dir, parallel, workers
+        )
 
         # JSON出力
         json_output = convert_to_json(ocr_result, image_path.name, resolution)
@@ -1428,11 +1790,21 @@ def main() -> int:
     if len(args.images) > 1 and args.output:
         print("警告: 複数ファイル指定時は-oオプションは無視されます", file=sys.stderr)
 
+    # ワーカー数のバリデーション
+    if args.workers < 1:
+        print(
+            f"警告: workers {args.workers} は無効です。1に設定します",
+            file=sys.stderr,
+        )
+        args.workers = 1
+
     tessdata_dir = resolve_tessdata_dir(args)
+    parallel = args.parallel
+    workers = args.workers
 
-    success_count = 0
+    # 存在するファイルのみ抽出
+    valid_image_paths = []
     error_count = 0
-
     for image_file in args.images:
         image_path = Path(image_file)
         if not image_path.exists():
@@ -1440,12 +1812,44 @@ def main() -> int:
                 f"エラー: 画像ファイルが見つかりません: {image_file}", file=sys.stderr
             )
             error_count += 1
-            continue
-
-        if process_image(image_path, args, tessdata_dir):
-            success_count += 1
         else:
-            error_count += 1
+            valid_image_paths.append(image_path)
+
+    success_count = 0
+
+    # 複数ファイルの並列処理
+    if parallel and len(valid_image_paths) > 1:
+        print(
+            f"並列処理モード: {workers}ワーカーで{len(valid_image_paths)}ファイルを処理中..."
+        )
+        with ProcessPoolExecutor(
+            max_workers=min(workers, len(valid_image_paths))
+        ) as executor:
+            # 各画像を並列処理 (ファイル単位ではProcessPoolを使用)
+            futures = {
+                executor.submit(
+                    process_image, image_path, args, tessdata_dir, parallel, workers
+                ): image_path
+                for image_path in valid_image_paths
+            }
+
+            for future in as_completed(futures):
+                image_path = futures[future]
+                try:
+                    if future.result():
+                        success_count += 1
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    print(f"エラー ({image_path}): {e}", file=sys.stderr)
+                    error_count += 1
+    else:
+        # 順次処理
+        for image_path in valid_image_paths:
+            if process_image(image_path, args, tessdata_dir, parallel, workers):
+                success_count += 1
+            else:
+                error_count += 1
 
     if len(args.images) > 1:
         print(f"\n処理完了: 成功 {success_count}件, エラー {error_count}件")

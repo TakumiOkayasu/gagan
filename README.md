@@ -106,6 +106,25 @@ uv run python gagan.py screenshot.png --super-resolution
 uv run python gagan.py screenshot.png --text-detection
 ```
 
+### 並列処理オプション
+
+```bash
+# 並列処理を有効化 (複数ファイル・aggressive・再OCRを並列実行)
+uv run python gagan.py *.png --parallel
+
+# ワーカー数を指定 (デフォルト: CPUコア数、最大8)
+uv run python gagan.py *.png --parallel --workers 4
+
+# 高精度モードと並列処理の組み合わせ
+uv run python gagan.py *.png --screenshot --aggressive --parallel
+```
+
+**並列処理の対象:**
+- 複数ファイルの同時処理 (ProcessPoolExecutor)
+- aggressive/screenshot_aggressiveモードでの複数前処理の同時実行 (ThreadPoolExecutor)
+- 低信頼度要素の再OCR (ThreadPoolExecutor)
+- 文字単位再OCR (ThreadPoolExecutor)
+
 ### tessdata_bestのインストール
 
 高精度訓練データを使用するには、別途ダウンロードが必要:
@@ -218,6 +237,67 @@ mkdir -p models && mv frozen_east_text_detection.pb models/
 | 「占」「上」等の誤認識 | 文字単位再OCRを使用 | `--char-retry` |
 | 処理が遅い | 高速モードを使用 | `--fast` |
 | 処理が遅い (再OCR無効化) | 再OCRをスキップ | `--no-retry` |
+
+### よく使うフラグの組み合わせ
+
+#### スクリーンショットのOCR (推奨)
+
+```bash
+# 基本 - ほとんどのスクショはこれでOK
+uv run python gagan.py screenshot.png --screenshot
+
+# 最高精度 - 複雑なUIや小さい文字がある場合
+uv run python gagan.py screenshot.png --screenshot --max-accuracy
+
+# ダークモードのスクショ - 自動検出されるが、明示的に指定も可能
+uv run python gagan.py screenshot.png --screenshot --inverted
+```
+
+#### 製造業・業務システムのUI
+
+```bash
+# 専門用語や製品コードが多い場合
+uv run python gagan.py screenshot.png --screenshot --max-accuracy --char-retry
+
+# 薄いグレー文字がある場合
+uv run python gagan.py screenshot.png --screenshot --aggressive
+```
+
+#### 処理速度優先
+
+```bash
+# 高速処理 (精度向上機能OFF)
+uv run python gagan.py screenshot.png --fast
+
+# 再OCRを無効化して高速化
+uv run python gagan.py screenshot.png --screenshot --no-retry
+```
+
+#### 複数ファイルの一括処理
+
+```bash
+# ワイルドカードで複数ファイル
+uv run python gagan.py screenshots/*.png --screenshot
+
+# 最高精度で一括処理
+uv run python gagan.py *.png --screenshot --max-accuracy
+
+# 並列処理で高速化 (大量ファイル向け)
+uv run python gagan.py *.png --screenshot --parallel
+
+# 最高精度 + 並列処理 (精度と速度のバランス)
+uv run python gagan.py *.png --screenshot --max-accuracy --parallel --workers 4
+```
+
+#### デバッグ・トラブルシューティング
+
+```bash
+# 前処理後の画像を確認
+uv run python gagan.py screenshot.png --screenshot --debug --keep-debug-images
+
+# 信頼度の低い結果も含めて確認
+uv run python gagan.py screenshot.png --screenshot --min-confidence 0.1
+```
 
 ## 出力形式
 
