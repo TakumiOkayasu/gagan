@@ -87,6 +87,9 @@ uv run python gagan.py screenshot.png --retry-threshold 0.9
 # 低信頼度要素の再OCRを無効化
 uv run python gagan.py screenshot.png --no-retry
 
+# 誤認識しやすい文字の文字単位再OCR (占、上、浴など)
+uv run python gagan.py screenshot.png --char-retry
+
 # 日本語誤認識修正を無効化
 uv run python gagan.py screenshot.png --no-japanese-correct
 
@@ -187,6 +190,13 @@ mkdir -p models && mv frozen_east_text_detection.pb models/
 - `--retry-threshold` で閾値を変更可能 (例: 0.9でより厳密に再OCR)
 - `--no-retry` で無効化可能 (処理速度優先時)
 
+**文字単位再OCR (`--char-retry`)**
+- 誤認識しやすい文字 (占、上、浴、甲、丘、士、充、民、音) を含む要素を検出
+- 該当領域を4倍に拡大し、シャープネス強化後に再OCR
+- 複数の前処理 (シャープ、適応的閾値、Otsu) と複数PSMで試行
+- 疑わしい文字が減少し、信頼度が同等以上の結果を採用
+- `--max-accuracy` に含まれる
+
 ### OCR失敗ケースと対処法
 
 | 失敗ケース | 対処法 | オプション |
@@ -205,6 +215,7 @@ mkdir -p models && mv frozen_east_text_detection.pb models/
 | 全体的に精度が低い | 最高精度モードを使用 | `--max-accuracy` |
 | スクショで最高精度が必要 | スクショ+最高精度モード | `--screenshot --max-accuracy` |
 | 信頼度の低い結果が多い | 再OCR閾値を上げる | `--retry-threshold 0.9` |
+| 「占」「上」等の誤認識 | 文字単位再OCRを使用 | `--char-retry` |
 | 処理が遅い | 高速モードを使用 | `--fast` |
 | 処理が遅い (再OCR無効化) | 再OCRをスキップ | `--no-retry` |
 

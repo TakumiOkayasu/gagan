@@ -115,11 +115,28 @@ def apply_rotation_if_needed(
 def upscale_image(
     image: np.ndarray, scale: float, interpolation: int = cv2.INTER_CUBIC
 ) -> np.ndarray:
-    """画像をスケールアップする。"""
+    """画像をスケールアップする。
+
+    Args:
+        image: 入力画像
+        scale: スケール倍率 (0より大きい値)
+        interpolation: 補間方法
+
+    Returns:
+        スケール後の画像。スケールが不正な場合は元の画像をそのまま返す。
+    """
+    if scale <= 0 or not np.isfinite(scale):
+        return image
+
     h, w = image.shape[:2]
-    return cv2.resize(
-        image, (int(w * scale), int(h * scale)), interpolation=interpolation
-    )
+    if h == 0 or w == 0:
+        return image
+
+    new_w, new_h = int(w * scale), int(h * scale)
+    if new_w <= 0 or new_h <= 0:
+        return image
+
+    return cv2.resize(image, (new_w, new_h), interpolation=interpolation)
 
 
 # =============================================================================
@@ -219,6 +236,8 @@ def upscale_if_needed(
 ) -> tuple[np.ndarray, float]:
     """画像が小さい場合にアップスケールする。"""
     h, w = image.shape[:2]
+    if h <= 0 or w <= 0:
+        return image, 1.0
     if h < min_height:
         scale = min_height / h
         return upscale_image(image, scale), scale
@@ -230,6 +249,8 @@ def upscale_small_ui_elements(
 ) -> tuple[np.ndarray, float]:
     """小さいUI要素の認識精度向上のためスケーリングする。"""
     h, w = image.shape[:2]
+    if h <= 0 or w <= 0:
+        return image, 1.0
     if h < 100:
         scale = max(2.0, min_text_height / 12)
         return upscale_image(image, scale), scale
@@ -491,6 +512,14 @@ def execute_ocr(
     tessdata_dir: Optional[str] = None,
 ) -> dict[str, Any]:
     """Tesseract OCRを実行し、テキストと座標情報を取得する。"""
+    # 空画像チェック
+    if image is None or image.size == 0:
+        return {"elements": [], "total_elements": 0}
+
+    h, w = image.shape[:2]
+    if h <= 0 or w <= 0:
+        return {"elements": [], "total_elements": 0}
+
     if psm is None:
         psm = select_optimal_psm(image)
 
@@ -1156,7 +1185,24 @@ def process_image(
     try:
         image = Image.open(image_path)
         resolution = (image.width, image.height)
-        psm = None if args.psm == "auto" else int(args.psm)
+
+        # PSMのバリデーション (0-13の範囲)
+        psm = None
+        if args.psm != "auto":
+            try:
+                psm = int(args.psm)
+                if not (0 <= psm <= 13):
+                    print(
+                        f"警告: PSM {psm} は範囲外です (0-13)。autoに設定します",
+                        file=sys.stderr,
+                    )
+                    psm = None
+            except ValueError:
+                print(
+                    f"警告: PSM '{args.psm}' は無効です。autoに設定します",
+                    file=sys.stderr,
+                )
+                psm = None
 
         # 超解像
         if args.super_resolution:
@@ -1190,6 +1236,10 @@ def process_image(
                     y1 = max(0, region["y"] - margin)
                     x2 = min(image.width, region["x"] + region["width"] + margin)
                     y2 = min(image.height, region["y"] + region["height"] + margin)
+
+                    # 座標の妥当性チェック
+                    if x2 <= x1 or y2 <= y1:
+                        continue
 
                     region_image = image.crop((x1, y1, x2, y2))
                     preprocess_func = (
@@ -1336,6 +1386,20 @@ def main() -> int:
         args.no_retry = True
         if args.psm == "auto":
             args.psm = "3"
+
+    # 信頼度閾値のバリデーション
+    if not (0.0 <= args.min_confidence <= 1.0):
+        print(
+            f"警告: min-confidence {args.min_confidence} は範囲外です (0.0-1.0)。0.3に設定します",
+            file=sys.stderr,
+        )
+        args.min_confidence = 0.3
+    if not (0.0 <= args.retry_threshold <= 1.0):
+        print(
+            f"警告: retry-threshold {args.retry_threshold} は範囲外です (0.0-1.0)。0.8に設定します",
+            file=sys.stderr,
+        )
+        args.retry_threshold = 0.8
 
     # 複数ファイル警告
     if len(args.images) > 1 and args.output:
