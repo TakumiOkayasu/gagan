@@ -1499,12 +1499,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-confidence", type=float, default=0.3, help="最小信頼度フィルタ"
     )
-    parser.add_argument(
-        "--retry-threshold", type=float, default=0.8, help="再OCRを実行する信頼度閾値"
-    )
-    parser.add_argument(
-        "--no-retry", action="store_true", help="低信頼度要素の再OCRを無効化"
-    )
     parser.add_argument("--char-retry", action="store_true", help="文字単位再OCRを実行")
     parser.add_argument(
         "--no-japanese-correct", action="store_true", help="日本語誤認識修正を無効化"
@@ -1785,17 +1779,16 @@ def apply_post_processing(
     workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
     """後処理を適用する。"""
-    # 低信頼度要素の再OCR
-    if not args.no_retry and args.retry_threshold > 0:
-        ocr_result = retry_low_confidence_ocr(
-            image,
-            ocr_result,
-            args.retry_threshold,
-            args.lang,
-            tessdata_dir,
-            parallel=parallel,
-            workers=workers,
-        )
+    # 低信頼度要素の再OCR (信頼度0.8未満は強制的に再OCR)
+    ocr_result = retry_low_confidence_ocr(
+        image,
+        ocr_result,
+        0.8,  # 固定閾値
+        args.lang,
+        tessdata_dir,
+        parallel=parallel,
+        workers=workers,
+    )
 
     # 文字単位再OCR
     if args.char_retry:
@@ -2085,7 +2078,6 @@ def main() -> int:
     if args.fast:
         args.min_confidence = 0.0
         args.no_japanese_correct = True
-        args.no_retry = True
         if args.psm == "auto":
             args.psm = "3"
 
@@ -2096,12 +2088,6 @@ def main() -> int:
             file=sys.stderr,
         )
         args.min_confidence = 0.3
-    if not (0.0 <= args.retry_threshold <= 1.0):
-        print(
-            f"警告: retry-threshold {args.retry_threshold} は範囲外です (0.0-1.0)。0.8に設定します",
-            file=sys.stderr,
-        )
-        args.retry_threshold = 0.8
 
     # 複数ファイル警告
     if len(args.images) > 1 and args.output:
