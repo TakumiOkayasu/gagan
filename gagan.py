@@ -617,6 +617,7 @@ def retry_low_confidence_ocr(
             continue
 
         best_result, best_confidence = elem, elem["confidence"]
+        original_confidence = elem["confidence"]
 
         for method_name in preprocess_methods:
             try:
@@ -633,6 +634,7 @@ def retry_low_confidence_ocr(
                         processed, lang, psm=psm, tessdata_dir=tessdata_dir
                     )
                     for new_elem in region_result["elements"]:
+                        # 常に最も信頼度の高い結果を採用
                         if new_elem["confidence"] > best_confidence:
                             best_confidence = new_elem["confidence"]
                             best_result = {
@@ -645,10 +647,19 @@ def retry_low_confidence_ocr(
                 continue
 
         improved_elements.append(best_result)
-        if best_confidence > elem["confidence"]:
-            print(
-                f"  改善: '{elem['text']}' ({elem['confidence']:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
-            )
+
+        # 結果のログ出力
+        if best_confidence > original_confidence:
+            if best_confidence >= confidence_threshold:
+                print(
+                    f"  改善(閾値超): '{elem['text']}' ({original_confidence:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
+                )
+            else:
+                print(
+                    f"  改善(閾値未満): '{elem['text']}' ({original_confidence:.2f}) -> '{best_result['text']}' ({best_confidence:.2f})"
+                )
+        else:
+            print(f"  改善なし: '{elem['text']}' ({original_confidence:.2f})")
 
     return {"elements": improved_elements, "total_elements": len(improved_elements)}
 
@@ -690,6 +701,7 @@ def retry_character_level_ocr(
             continue
 
         original_text = elem["text"]
+        original_confidence = elem["confidence"]
 
         # 高解像度化 (4倍)
         img_array = np.array(region_image)
@@ -708,7 +720,7 @@ def retry_character_level_ocr(
         sharpened = apply_sharpening(gray)
 
         # 複数の前処理で試行
-        best_text, best_confidence = original_text, elem["confidence"]
+        best_text, best_confidence = original_text, original_confidence
 
         preprocess_variants = [
             sharpened,
@@ -732,15 +744,26 @@ def retry_character_level_ocr(
                         )
                         new_count = sum(1 for c in new_text if c in SUSPICIOUS_CHARS)
 
+                        # 疑わしい文字が減少し、信頼度が90%以上なら採用
                         if new_count < old_count and new_conf >= best_confidence * 0.9:
                             best_text, best_confidence = new_text, new_conf
+                        # または、信頼度が向上した場合は採用
                         elif new_conf > best_confidence:
                             best_text, best_confidence = new_text, new_conf
                 except Exception:
                     continue
 
+        # 結果のログ出力
         if best_text != original_text:
-            print(f"  文字単位改善: '{original_text}' -> '{best_text}'")
+            print(
+                f"  文字単位改善: '{original_text}' ({original_confidence:.2f}) -> '{best_text}' ({best_confidence:.2f})"
+            )
+        elif best_confidence > original_confidence:
+            print(
+                f"  信頼度改善: '{original_text}' ({original_confidence:.2f}) -> ({best_confidence:.2f})"
+            )
+        else:
+            print(f"  改善なし: '{original_text}' ({original_confidence:.2f})")
 
         improved_elements.append(
             {
