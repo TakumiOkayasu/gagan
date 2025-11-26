@@ -1292,6 +1292,75 @@ def main() -> int:
                     processed_image, args.lang, psm=psm, tessdata_dir=tessdata_dir
                 )
 
+            elif args.screenshot and args.aggressive:
+                # スクリーンショット + 高精度モード
+                print("スクリーンショット高精度モードで処理中...")
+
+                debug_paths = []
+                screenshot_psm = psm if psm is not None else 11
+
+                # 1. スクリーンショット専用前処理
+                processed_screenshot = preprocess_image_screenshot(
+                    image, args.detect_rotation
+                )
+                if args.debug:
+                    debug_screenshot_path = image_path.with_suffix(".screenshot.png")
+                    cv2.imwrite(str(debug_screenshot_path), processed_screenshot)
+                    debug_paths.append(debug_screenshot_path)
+                    print(
+                        f"スクショ前処理済み画像を保存しました: {debug_screenshot_path}"
+                    )
+
+                ocr_result_screenshot = execute_ocr(
+                    processed_screenshot,
+                    args.lang,
+                    psm=screenshot_psm,
+                    tessdata_dir=tessdata_dir,
+                )
+                print(f"スクショ前処理: {ocr_result_screenshot['total_elements']}要素")
+
+                # 2. 軽量前処理 (二値化なし)
+                processed_light = preprocess_image_light(image, args.detect_rotation)
+                if args.debug:
+                    debug_light_path = image_path.with_suffix(".light.png")
+                    cv2.imwrite(str(debug_light_path), processed_light)
+                    debug_paths.append(debug_light_path)
+                    print(f"軽量前処理済み画像を保存しました: {debug_light_path}")
+
+                ocr_result_light = execute_ocr(
+                    processed_light,
+                    args.lang,
+                    psm=screenshot_psm,
+                    tessdata_dir=tessdata_dir,
+                )
+                print(f"軽量前処理: {ocr_result_light['total_elements']}要素")
+
+                # 3. 反転処理 (ダークモード対応)
+                processed_inverted = preprocess_image_inverted(
+                    image, args.detect_rotation
+                )
+                if args.debug:
+                    debug_inverted_path = image_path.with_suffix(".inverted.png")
+                    cv2.imwrite(str(debug_inverted_path), processed_inverted)
+                    debug_paths.append(debug_inverted_path)
+                    print(f"反転処理済み画像を保存しました: {debug_inverted_path}")
+
+                ocr_result_inverted = execute_ocr(
+                    processed_inverted,
+                    args.lang,
+                    psm=screenshot_psm,
+                    tessdata_dir=tessdata_dir,
+                )
+                print(f"反転処理: {ocr_result_inverted['total_elements']}要素")
+
+                # 結果をマージ
+                ocr_result = merge_ocr_results(ocr_result_screenshot, ocr_result_light)
+                ocr_result = merge_ocr_results(ocr_result, ocr_result_inverted)
+                print(f"マージ後: {ocr_result['total_elements']}要素")
+
+                if args.debug:
+                    debug_image_path = debug_paths
+
             elif args.screenshot:
                 # スクリーンショット専用モード
                 processed_image = preprocess_image_screenshot(
