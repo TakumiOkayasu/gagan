@@ -10,3 +10,4 @@ janome>=0.5.0  # --post-process オプション用 (形態素解析)
 # Alternative OCR engines (optional)
 paddleocr>=2.7.0  # --engine paddleocr 用 (高速・高精度)
 paddlepaddle>=2.5.0  # PaddleOCR依存 (CPU版、GPU版は paddlepaddle-gpu)
+

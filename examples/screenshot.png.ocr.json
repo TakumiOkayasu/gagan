@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-11-20T14:06:21",
+  "timestamp": "2025-11-26T21:37:40",
   "source_image": "screenshot.png",
   "resolution": {
     "width": 2164,
@@ -8,91 +8,135 @@
   "elements": [
     {
       "id": 0,
-      "text": "9",
+      "text": "@",
       "bbox": {
-        "x": 0,
-        "y": 0,
-        "width": 36,
-        "height": 69
+        "x": 108,
+        "y": 14,
+        "width": 42,
+        "height": 20
       },
-      "confidence": 0.38
+      "confidence": 0.88
     },
     {
       "id": 1,
-      "text": "PC",
+      "text": "の",
       "bbox": {
-        "x": 60,
-        "y": 0,
-        "width": 67,
-        "height": 80
+        "x": 189,
+        "y": 8,
+        "width": 35,
+        "height": 35
       },
-      "confidence": 0.43
+      "confidence": 0.93
     },
     {
       "id": 2,
-      "text": "の",
+      "text": "=",
       "bbox": {
-        "x": 158,
-        "y": 12,
-        "width": 16,
-        "height": 51
+        "x": 232,
+        "y": 8,
+        "width": 30,
+        "height": 35
+      },
+      "confidence": 0.78
+    },
+    {
+      "id": 3,
+      "text": "=",
+      "bbox": {
+        "x": 273,
+        "y": 18,
+        "width": 9,
+        "height": 14
+      },
+      "confidence": 0.87
+    },
+    {
+      "id": 4,
+      "text": "Excel",
+      "bbox": {
+        "x": 304,
+        "y": 17,
+        "width": 93,
+        "height": 17
+      },
+      "confidence": 0.96
+    },
+    {
+      "id": 5,
+      "text": "オー",
+      "bbox": {
+        "x": 1764,
+        "y": 87,
+        "width": 63,
+        "height": 17
+      },
+      "confidence": 0.93
+    },
+    {
+      "id": 6,
+      "text": "©",
+      "bbox": {
+        "x": 1840,
+        "y": 91,
+        "width": 10,
+        "height": 9
+      },
+      "confidence": 0.65
+    },
+    {
+      "id": 7,
+      "text": "2Y",
+      "bbox": {
+        "x": 1873,
+        "y": 81,
+        "width": 36,
+        "height": 40
       },
       "confidence": 0.75
     },
     {
-      "id": 3,
+      "id": 8,
       "text": "の",
       "bbox": {
-        "x": 174,
-        "y": 12,
-        "width": 47,
-        "height": 57
+        "x": 1939,
+        "y": 85,
+        "width": 20,
+        "height": 32
       },
-      "confidence": 0.0
+      "confidence": 0.76
     },
     {
-      "id": 4,
-      "text": "で",
+      "id": 9,
+      "text": "oo",
       "bbox": {
-        "x": 228,
-        "y": 13,
-        "width": 33,
-        "height": 55
-      },
-      "confidence": 0.09
-    },
-    {
-      "id": 5,
-      "text": "©",
-      "bbox": {
-        "x": 273,
-        "y": 17,
-        "width": 7,
-        "height": 53
-      },
-      "confidence": 0.33
-    },
-    {
-      "id": 6,
-      "text": "es",
-      "bbox": {
-        "x": 300,
-        "y": 59,
-        "width": 32,
+        "x": 1991,
+        "y": 94,
+        "width": 17,
         "height": 17
       },
-      "confidence": 0.28
+      "confidence": 0.69
     },
     {
-      "id": 7,
-      "text": "SD",
+      "id": 10,
+      "text": "に",
       "bbox": {
-        "x": 303,
-        "y": 16,
-        "width": 95,
-        "height": 19
+        "x": 1743,
+        "y": 111,
+        "width": 61,
+        "height": 46
       },
-      "confidence": 0.0
+      "confidence": 0.47
+    },
+    {
+      "id": 11,
+      "text": "=",
+      "bbox": {
+        "x": 1865,
+        "y": 90,
+        "width": 154,
+        "height": 87
+      },
+      "confidence": 0.85
     }
   ]
 }
