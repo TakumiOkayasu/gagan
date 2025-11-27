@@ -26,6 +26,7 @@ from src.preprocessing import (
     PREPROCESS_FUNCTIONS,
     PreprocessFunc,
     apply_auto_sharpening,
+    compute_edges,
     preprocess_image_adaptive,
     preprocess_image_inverted,
     preprocess_image_light,
@@ -287,6 +288,14 @@ def process_image(
 
         # 自動シャープ化 (リサイズによる文字ボケ軽減)
         image_array = apply_auto_sharpening(image_array)
+
+        # エッジ検出画像の保存
+        if args.save_edges:
+            gray_for_edges = to_grayscale(image_array)
+            edges = compute_edges(gray_for_edges)
+            edges_path = image_path.parent / f"{image_path.name}.edges.png"
+            cv2.imwrite(str(edges_path), edges)
+            print(f"エッジ検出画像を保存しました: {edges_path}")
 
         # PSMのバリデーション (0-13の範囲)
         psm: Optional[int] = None
@@ -562,17 +571,30 @@ def run_regions_only_mode(
             print(f"エラー: {image_path}: {e}", file=sys.stderr)
             error_count += 1
 
-    # 出力
-    if len(all_results) == 1:
-        output_json = json.dumps(all_results[0], ensure_ascii=False, indent=2)
-    else:
-        output_json = json.dumps(all_results, ensure_ascii=False, indent=2)
-
+    # 出力ファイル名の決定
     if args.output:
-        Path(args.output).write_text(output_json, encoding="utf-8")
-        print(f"結果を保存しました: {args.output}")
+        output_path = Path(args.output)
     else:
-        print(output_json)
+        # 単一ファイル: {元ファイルパス}.regions.json
+        # 複数ファイル: {画像ディレクトリ}/regions_{タイムスタンプ}.json
+        if len(valid_image_paths) == 1:
+            img_path = valid_image_paths[0]
+            output_path = img_path.parent / f"{img_path.name}.regions.json"
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = valid_image_paths[0].parent
+            output_path = output_dir / f"regions_{timestamp}.json"
+
+    # 単一ファイルでも配列で統一 (Claude連携で扱いやすい)
+    output_data = {
+        "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "total_images": len(all_results),
+        "images": all_results,
+    }
+    output_json = json.dumps(output_data, ensure_ascii=False, indent=2)
+
+    output_path.write_text(output_json, encoding="utf-8")
+    print(f"結果を保存しました: {output_path}")
 
     return error_count
 

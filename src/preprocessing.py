@@ -46,9 +46,14 @@ def to_grayscale(image: np.ndarray | Image.Image) -> np.ndarray:
     return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
 
+def compute_edges(image: np.ndarray) -> np.ndarray:
+    """Cannyエッジ検出を実行する。"""
+    return cv2.Canny(image, 50, 150, apertureSize=3)
+
+
 def detect_rotation(image: np.ndarray) -> float:
     """画像の回転角度を検出する。"""
-    edges = cv2.Canny(image, 50, 150, apertureSize=3)
+    edges = compute_edges(image)
     lines = cv2.HoughLines(edges, 1, np.pi / 180, 200)
 
     if lines is None:
