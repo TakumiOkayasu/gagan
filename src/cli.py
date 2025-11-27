@@ -52,7 +52,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--detect-rotation", action="store_true", help="回転検出と補正を有効化"
     )
     parser.add_argument(
-        "--save-edges", action="store_true", help="エッジ検出画像を出力"
+        "--save-sharpened", action="store_true", help="シャープ化画像を出力"
     )
 
     # 精度向上オプション

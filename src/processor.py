@@ -26,7 +26,6 @@ from src.preprocessing import (
     PREPROCESS_FUNCTIONS,
     PreprocessFunc,
     apply_auto_sharpening,
-    compute_edges,
     preprocess_image_adaptive,
     preprocess_image_inverted,
     preprocess_image_light,
@@ -289,13 +288,13 @@ def process_image(
         # 自動シャープ化 (リサイズによる文字ボケ軽減)
         image_array = apply_auto_sharpening(image_array)
 
-        # エッジ検出画像の保存
-        if args.save_edges:
-            gray_for_edges = to_grayscale(image_array)
-            edges = compute_edges(gray_for_edges)
-            edges_path = image_path.parent / f"{image_path.name}.edges.png"
-            cv2.imwrite(str(edges_path), edges)
-            print(f"エッジ検出画像を保存しました: {edges_path}")
+        # シャープ化画像の保存
+        if args.save_sharpened:
+            sharpened_path = image_path.parent / f"{image_path.name}.sharpened.png"
+            cv2.imwrite(
+                str(sharpened_path), cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+            )
+            print(f"シャープ化画像を保存しました: {sharpened_path}")
 
         # PSMのバリデーション (0-13の範囲)
         psm: Optional[int] = None
@@ -531,6 +530,18 @@ def run_regions_only_mode(
 
             # 自動シャープ化
             image_array = apply_auto_sharpening(image_array)
+
+            # シャープ化画像の保存
+            if args.save_sharpened:
+                sharpened_path = image_path.parent / f"{image_path.name}.sharpened.png"
+                if len(image_array.shape) == 3:
+                    cv2.imwrite(
+                        str(sharpened_path),
+                        cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR),
+                    )
+                else:
+                    cv2.imwrite(str(sharpened_path), image_array)
+                print(f"シャープ化画像を保存しました: {sharpened_path}")
 
             # BGR変換 (EAST用)
             if len(image_array.shape) == 2:
