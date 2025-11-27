@@ -27,7 +27,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     # === 画像処理オプション (OCR不要) ===
     parser.add_argument(
-        "--save-sharpened", action="store_true", help="シャープ化画像を出力"
+        "--save-sharpened",
+        action="store_true",
+        help="ビジョンAI向け最適化画像を出力 (.optimized.png)",
     )
     parser.add_argument(
         "--regions-only",

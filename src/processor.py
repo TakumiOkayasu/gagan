@@ -26,6 +26,7 @@ from src.preprocessing import (
     PREPROCESS_FUNCTIONS,
     PreprocessFunc,
     apply_auto_sharpening,
+    optimize_for_vision_ai,
     preprocess_image_adaptive,
     preprocess_image_inverted,
     preprocess_image_light,
@@ -285,19 +286,21 @@ def process_image(
         # 最初にNumPy配列に変換 (以降の処理で再利用)
         image_array = np.array(image)
 
-        # 自動シャープ化 (リサイズによる文字ボケ軽減)
-        image_array = apply_auto_sharpening(image_array)
-
-        # シャープ化画像の保存
+        # ビジョンAI向け最適化画像の保存 (元画像から直接処理)
         if args.save_sharpened:
-            sharpened_path = image_path.with_suffix(".sharpened.png")
+            # RGB -> BGR変換してから最適化
             if len(image_array.shape) == 3:
-                cv2.imwrite(
-                    str(sharpened_path), cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-                )
+                img_bgr = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                optimized = optimize_for_vision_ai(img_bgr)
             else:
-                cv2.imwrite(str(sharpened_path), image_array)
-            print(f"シャープ化画像を保存しました: {sharpened_path}")
+                optimized = optimize_for_vision_ai(image_array)
+
+            optimized_path = image_path.with_suffix(".optimized.png")
+            cv2.imwrite(str(optimized_path), optimized)
+            print(f"最適化画像を保存しました: {optimized_path}")
+
+        # 自動シャープ化 (リサイズによる文字ボケ軽減) - OCR用
+        image_array = apply_auto_sharpening(image_array)
 
         # PSMのバリデーション (0-13の範囲)
         psm: Optional[int] = None
@@ -531,20 +534,20 @@ def run_regions_only_mode(
             resolution = (image.width, image.height)
             image_array = np.array(image)
 
+            # ビジョンAI向け最適化画像の保存 (元画像から直接処理)
+            if args.save_sharpened:
+                if len(image_array.shape) == 3:
+                    img_bgr = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                    optimized = optimize_for_vision_ai(img_bgr)
+                else:
+                    optimized = optimize_for_vision_ai(image_array)
+
+                optimized_path = image_path.with_suffix(".optimized.png")
+                cv2.imwrite(str(optimized_path), optimized)
+                print(f"最適化画像を保存しました: {optimized_path}")
+
             # 自動シャープ化
             image_array = apply_auto_sharpening(image_array)
-
-            # シャープ化画像の保存
-            if args.save_sharpened:
-                sharpened_path = image_path.with_suffix(".sharpened.png")
-                if len(image_array.shape) == 3:
-                    cv2.imwrite(
-                        str(sharpened_path),
-                        cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR),
-                    )
-                else:
-                    cv2.imwrite(str(sharpened_path), image_array)
-                print(f"シャープ化画像を保存しました: {sharpened_path}")
 
             # BGR変換 (EAST用)
             if len(image_array.shape) == 2:

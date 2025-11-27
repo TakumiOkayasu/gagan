@@ -273,59 +273,117 @@ def apply_sharpening(
     return cv2.addWeighted(image, alpha, gaussian, beta, 0)
 
 
-def _calculate_sharpening_params(height: int) -> tuple[float, float]:
-    """画像の高さに基づいてシャープ化パラメータを計算する。
+def optimize_for_vision_ai(image: np.ndarray, target_height: int = 1080) -> np.ndarray:
+    """Claude等のビジョンAI向けに画像を最適化する。
 
-    4K (2160p) 以上の高解像度画像では、文字のエッジがぼやけやすいため
-    より強いシャープ化を適用する。
+    高解像度画像はAI内部でリサイズされてボケるため、
+    事前に適切なサイズにダウンスケールする。
+    スクリーンショットは元々シャープなので、余計な処理はしない。
 
     Args:
-        height: 画像の高さ (ピクセル)
+        image: 入力画像 (BGR or グレースケール)
+        target_height: 目標の高さ (デフォルト: 1080)
 
     Returns:
-        (sigma, strength) のタプル
-    """
-    if height >= 2160:  # 4K以上
-        # 4K画像: 強めのシャープ化 (sigma=2.0, strength=1.8)
-        return 2.0, 1.8
-    elif height >= 1440:  # QHD (1440p)
-        return 1.8, 1.5
-    elif height >= 1080:  # FHD (1080p)
-        return 1.5, 1.2
-    else:
-        # 低解像度: 標準のシャープ化
-        return 1.5, 1.0
-
-
-def apply_auto_sharpening(image: np.ndarray) -> np.ndarray:
-    """画像読み込み直後に自動でシャープ化を適用する。
-
-    リサイズされた画像の文字ボケを軽減するための処理。
-    カラー画像・グレースケール画像の両方に対応。
-    高解像度画像 (4K等) では自動的に強いシャープ化を適用。
+        最適化された画像
     """
     if image is None or image.size == 0:
         return image
 
-    # 画像の高さに基づいてシャープ化パラメータを決定
-    height = image.shape[0]
-    sigma, strength = _calculate_sharpening_params(height)
+    h, w = image.shape[:2]
 
-    # カラー画像の場合はLチャンネルのみシャープ化 (色ずれ防止)
+    # 高解像度の場合のみダウンスケール
+    if h > target_height:
+        scale = target_height / h
+        new_w = int(w * scale)
+        # INTER_AREA: ダウンスケール時に最適 (モアレ防止)
+        return cv2.resize(image, (new_w, target_height), interpolation=cv2.INTER_AREA)
+
+    # 既に適切なサイズならそのまま返す
+    return image
+
+
+def _is_screenshot(image: np.ndarray) -> bool:
+    """画像がスクリーンショットかどうかを判定する。
+
+    スクリーンショットの特徴:
+    - エッジがシャープ (勾配が急峻)
+    - ノイズが少ない
+    - 色数が限定的
+
+    Args:
+        image: グレースケール画像
+
+    Returns:
+        スクリーンショットと判定された場合True
+    """
+    # Laplacian分散でシャープネスを計測
+    laplacian_var = cv2.Laplacian(image, cv2.CV_64F).var()
+
+    # スクリーンショットは通常シャープ (分散が大きい)
+    # 写真やスキャン画像は分散が小さい傾向
+    return laplacian_var > 500
+
+
+def _enhance_for_ocr(image: np.ndarray, height: int) -> np.ndarray:
+    """OCR向けに画像を強調する。
+
+    スクリーンショットは軽い処理、それ以外は標準的な強調を適用。
+    文字がつぶれないよう、処理は控えめに設定。
+
+    Args:
+        image: グレースケール画像
+        height: 元画像の高さ (解像度判定用)
+
+    Returns:
+        OCR向けに強調された画像
+    """
+    is_screenshot = _is_screenshot(image)
+
+    if is_screenshot:
+        # スクリーンショット: 既にシャープなので軽い処理のみ
+        # バイラテラルフィルタでノイズ除去 (エッジ保持)
+        return cv2.bilateralFilter(image, 5, 50, 50)
+
+    # 写真/スキャン画像: 標準的なシャープ化
+    if height >= 2160:  # 4K以上
+        return apply_sharpening(image, sigma=1.5, strength=0.8)
+    elif height >= 1080:  # FHD以上
+        return apply_sharpening(image, sigma=1.2, strength=0.6)
+    else:
+        # 低解像度: 少し強めのシャープ化
+        return apply_sharpening(image, sigma=1.0, strength=1.0)
+
+
+def apply_auto_sharpening(image: np.ndarray) -> np.ndarray:
+    """画像読み込み直後に自動でOCR向け前処理を適用する。
+
+    スクリーンショットかどうかを自動判定し、適切な処理を適用。
+    - スクリーンショット: 軽いノイズ除去のみ (既にシャープ)
+    - 写真/スキャン: 解像度に応じたシャープ化
+
+    カラー画像・グレースケール画像の両方に対応。
+    """
+    if image is None or image.size == 0:
+        return image
+
+    height = image.shape[0]
+
+    # カラー画像の場合はLチャンネルのみ処理 (色ずれ防止)
     if len(image.shape) == 3 and image.shape[2] >= 3:
         # BGRからLabに変換
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
         l_channel, a_channel, b_channel = cv2.split(lab)
 
-        # Lチャンネルにシャープ化適用
-        l_sharpened = apply_sharpening(l_channel, sigma=sigma, strength=strength)
+        # Lチャンネルに適応的な強調を適用
+        l_enhanced = _enhance_for_ocr(l_channel, height)
 
         # 再結合
-        lab_sharpened = cv2.merge([l_sharpened, a_channel, b_channel])
-        return cv2.cvtColor(lab_sharpened, cv2.COLOR_LAB2BGR)
+        lab_enhanced = cv2.merge([l_enhanced, a_channel, b_channel])
+        return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
     else:
         # グレースケール画像
-        return apply_sharpening(image, sigma=sigma, strength=strength)
+        return _enhance_for_ocr(image, height)
 
 
 def preprocess_image_screenshot(
