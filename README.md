@@ -2,6 +2,27 @@
 
 スクリーンショットからテキストを抽出し、座標情報とともにJSON形式で出力するOCRツール。
 
+## プロジェクト構造
+
+```
+gagan/
+├── gagan.py              # エントリーポイント
+├── src/
+│   ├── __init__.py
+│   ├── types.py          # 型定義 (BBox, OCRElement, OCRResult等)
+│   ├── config.py         # 設定・定数
+│   ├── preprocessing.py  # 画像前処理 (グレースケール、二値化、シャープ化等)
+│   ├── ocr_engines.py    # OCRエンジン (Tesseract, PaddleOCR)
+│   ├── text_detection.py # EASTテキスト領域検出、超解像
+│   ├── postprocessing.py # 後処理 (日本語誤認識修正、再OCR等)
+│   ├── benchmark.py      # ベンチマーク機能
+│   ├── processor.py      # メイン処理ロジック
+│   └── cli.py            # CLIインターフェース
+├── models/               # MLモデル (EAST, ESPCN)
+├── examples/             # サンプル画像・出力
+└── tests/                # テスト
+```
+
 ## インストール
 
 ### Tesseract OCRのインストール
@@ -104,19 +125,27 @@ uv run python gagan.py screenshot.png --super-resolution
 
 # EASTテキスト領域検出(要: モデルファイル)
 uv run python gagan.py screenshot.png --text-detection
+
+# テキスト領域検出のみ (OCRをスキップ、Claude連携用)
+uv run python gagan.py screenshot.png --regions-only
 ```
 
 ### 並列処理オプション
 
-```bash
-# 並列処理を有効化 (複数ファイル・aggressive・再OCRを並列実行)
-uv run python gagan.py *.png --parallel
+並列処理はデフォルトで有効です。
 
-# ワーカー数を指定 (デフォルト: CPUコア数、最大8)
-uv run python gagan.py *.png --parallel --workers 4
+```bash
+# デフォルト: 並列処理有効 (ワーカー数: CPUコア数、最大8)
+uv run python gagan.py *.png --screenshot
+
+# ワーカー数を指定
+uv run python gagan.py *.png --workers 4
+
+# 並列処理を無効化 (シングルスレッド)
+uv run python gagan.py *.png --no-parallel
 
 # 高精度モードと並列処理の組み合わせ
-uv run python gagan.py *.png --screenshot --aggressive --parallel
+uv run python gagan.py *.png --screenshot --aggressive
 ```
 
 **並列処理の対象:**
@@ -312,17 +341,17 @@ uv run python gagan.py screenshot.png --no-upscale
 #### 複数ファイルの一括処理
 
 ```bash
-# ワイルドカードで複数ファイル
+# ワイルドカードで複数ファイル (並列処理はデフォルトで有効)
 uv run python gagan.py screenshots/*.png --screenshot
 
 # 最高精度で一括処理
 uv run python gagan.py *.png --screenshot --max-accuracy
 
-# 並列処理で高速化 (大量ファイル向け)
-uv run python gagan.py *.png --screenshot --parallel
+# ワーカー数を指定して並列処理
+uv run python gagan.py *.png --screenshot --workers 4
 
-# 最高精度 + 並列処理 (精度と速度のバランス)
-uv run python gagan.py *.png --screenshot --max-accuracy --parallel --workers 4
+# 最高精度 + ワーカー数指定
+uv run python gagan.py *.png --screenshot --max-accuracy --workers 4
 ```
 
 #### デバッグ・トラブルシューティング

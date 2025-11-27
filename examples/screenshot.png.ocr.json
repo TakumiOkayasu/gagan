@@ -1,5 +1,5 @@
 {
-  "timestamp": "2025-11-26T21:37:40",
+  "timestamp": "2025-11-27T17:16:10",
   "source_image": "screenshot.png",
   "resolution": {
     "width": 2164,
@@ -8,135 +8,234 @@
   "elements": [
     {
       "id": 0,
-      "text": "@",
+      "text": "=",
       "bbox": {
-        "x": 108,
-        "y": 14,
-        "width": 42,
-        "height": 20
+        "x": 81,
+        "y": 117,
+        "width": 8,
+        "height": 11
       },
-      "confidence": 0.88
+      "confidence": 0.83
     },
     {
       "id": 1,
-      "text": "の",
+      "text": "A",
       "bbox": {
-        "x": 189,
-        "y": 8,
-        "width": 35,
-        "height": 35
+        "x": 419,
+        "y": 130,
+        "width": 3,
+        "height": 4
       },
-      "confidence": 0.93
+      "confidence": 0.96
     },
     {
       "id": 2,
-      "text": "=",
+      "text": "書式",
       "bbox": {
-        "x": 232,
-        "y": 8,
-        "width": 30,
-        "height": 35
+        "x": 77,
+        "y": 140,
+        "width": 45,
+        "height": 12
       },
-      "confidence": 0.78
+      "confidence": 0.94
     },
     {
       "id": 3,
-      "text": "=",
+      "text": "4",
       "bbox": {
-        "x": 273,
-        "y": 18,
-        "width": 9,
-        "height": 14
+        "x": 15,
+        "y": 340,
+        "width": 3,
+        "height": 5
       },
-      "confidence": 0.87
+      "confidence": 0.91
     },
     {
       "id": 4,
-      "text": "Excel",
+      "text": "っ",
       "bbox": {
-        "x": 304,
-        "y": 17,
-        "width": 93,
-        "height": 17
+        "x": 285,
+        "y": 329,
+        "width": 55,
+        "height": 13
       },
       "confidence": 0.96
     },
     {
       "id": 5,
-      "text": "オー",
+      "text": "つ",
       "bbox": {
-        "x": 1764,
-        "y": 87,
-        "width": 63,
-        "height": 17
+        "x": 286,
+        "y": 355,
+        "width": 54,
+        "height": 12
       },
-      "confidence": 0.93
+      "confidence": 0.89
     },
     {
       "id": 6,
-      "text": "©",
+      "text": "6",
       "bbox": {
-        "x": 1840,
-        "y": 91,
-        "width": 10,
-        "height": 9
+        "x": 15,
+        "y": 394,
+        "width": 5,
+        "height": 6
       },
-      "confidence": 0.65
+      "confidence": 0.95
     },
     {
       "id": 7,
-      "text": "2Y",
+      "text": "ノ",
       "bbox": {
-        "x": 1873,
-        "y": 81,
-        "width": 36,
-        "height": 40
+        "x": 287,
+        "y": 380,
+        "width": 39,
+        "height": 12
+      },
+      "confidence": 0.92
+    },
+    {
+      "id": 8,
+      "text": "スー",
+      "bbox": {
+        "x": 329,
+        "y": 378,
+        "width": 28,
+        "height": 13
+      },
+      "confidence": 0.89
+    },
+    {
+      "id": 9,
+      "text": "SheetL",
+      "bbox": {
+        "x": 128,
+        "y": 1509,
+        "width": 46,
+        "height": 11
+      },
+      "confidence": 0.7
+    },
+    {
+      "id": 10,
+      "text": "どちら",
+      "bbox": {
+        "x": 1244,
+        "y": 99,
+        "width": 27,
+        "height": 13
+      },
+      "confidence": 0.95
+    },
+    {
+      "id": 11,
+      "text": "で",
+      "bbox": {
+        "x": 1289,
+        "y": 99,
+        "width": 14,
+        "height": 13
+      },
+      "confidence": 0.96
+    },
+    {
+      "id": 12,
+      "text": "も",
+      "bbox": {
+        "x": 1307,
+        "y": 99,
+        "width": 9,
+        "height": 13
+      },
+      "confidence": 0.92
+    },
+    {
+      "id": 13,
+      "text": "om",
+      "bbox": {
+        "x": 1315,
+        "y": 95,
+        "width": 16,
+        "height": 26
+      },
+      "confidence": 0.5
+    },
+    {
+      "id": 14,
+      "text": "メモ",
+      "bbox": {
+        "x": 1243,
+        "y": 128,
+        "width": 29,
+        "height": 12
+      },
+      "confidence": 0.95
+    },
+    {
+      "id": 15,
+      "text": "a",
+      "bbox": {
+        "x": 1348,
+        "y": 99,
+        "width": 29,
+        "height": 14
       },
       "confidence": 0.75
     },
     {
-      "id": 8,
-      "text": "の",
+      "id": 16,
+      "text": "リン",
       "bbox": {
-        "x": 1939,
-        "y": 85,
-        "width": 20,
-        "height": 32
+        "x": 1352,
+        "y": 128,
+        "width": 40,
+        "height": 12
       },
-      "confidence": 0.76
+      "confidence": 0.9
     },
     {
-      "id": 9,
-      "text": "oo",
+      "id": 17,
+      "text": "ク",
       "bbox": {
-        "x": 1991,
-        "y": 94,
-        "width": 17,
-        "height": 17
+        "x": 1380,
+        "y": 121,
+        "width": 15,
+        "height": 28
       },
-      "confidence": 0.69
+      "confidence": 0.91
     },
     {
-      "id": 10,
-      "text": "に",
+      "id": 18,
+      "text": "セル",
       "bbox": {
-        "x": 1743,
-        "y": 111,
-        "width": 61,
-        "height": 46
+        "x": 1401,
+        "y": 128,
+        "width": 29,
+        "height": 11
       },
-      "confidence": 0.47
+      "confidence": 0.77
     },
     {
-      "id": 11,
-      "text": "=",
+      "id": 19,
+      "text": "|",
       "bbox": {
-        "x": 1865,
-        "y": 90,
-        "width": 154,
-        "height": 87
+        "x": 1454,
+        "y": 101,
+        "width": 29,
+        "height": 12
       },
-      "confidence": 0.85
+      "confidence": 0.75
+    },
+    {
+      "id": 20,
+      "text": "計算",
+      "bbox": {
+        "x": 1454,
+        "y": 127,
+        "width": 30,
+        "height": 14
+      },
+      "confidence": 0.96
     }
   ]
 }
