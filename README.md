@@ -304,6 +304,9 @@ uv run python gagan.py screenshot.png --fast
 
 # 再OCRを無効化して高速化
 uv run python gagan.py screenshot.png --screenshot --no-retry
+
+# アップスケールを無効化 (高解像度画像向け)
+uv run python gagan.py screenshot.png --no-upscale
 ```
 
 #### 複数ファイルの一括処理
@@ -330,6 +333,45 @@ uv run python gagan.py screenshot.png --screenshot --debug --keep-debug-images
 
 # 信頼度の低い結果も含めて確認
 uv run python gagan.py screenshot.png --screenshot --min-confidence 0.1
+```
+
+## 高解像度画像 (4K等) の処理
+
+### 自動最適化
+
+高さ1500px以上の画像では、不要なアップスケール処理が自動的にスキップされ、処理速度が向上します。
+4K (3840x2160) のスクリーンショットはそのまま処理可能です。
+
+### 事前リサイズによる高速化 (推奨)
+
+4K画像をFHD (1920x1080) に事前リサイズすることで、処理速度を大幅に向上できます。
+
+```bash
+# ImageMagick (高品質Lanczos補間)
+convert input_4k.png -resize 1920x1080 -filter Lanczos output_fhd.png
+
+# シャープネス補正付き (文字のぼやけ軽減)
+convert input_4k.png -resize 1920x1080 -filter Lanczos -sharpen 0x0.5 output_fhd.png
+
+# ffmpeg
+ffmpeg -i input_4k.png -vf "scale=1920:1080:flags=lanczos" output_fhd.png
+```
+
+**リサイズ時の注意点:**
+- Lanczos補間を使用する (文字のエッジがシャープに保たれる)
+- アスペクト比を維持する (文字が歪むと認識率が低下)
+- 必要に応じてシャープネス補正を適用
+
+### --no-upscale オプション
+
+すべてのアップスケール処理を無効化します。高解像度画像で最速処理が必要な場合に使用:
+
+```bash
+# アップスケール完全無効化
+uv run python gagan.py screenshot.png --no-upscale
+
+# 最速モード (高速処理 + アップスケール無効)
+uv run python gagan.py screenshot.png --fast --no-upscale
 ```
 
 ## 出力形式

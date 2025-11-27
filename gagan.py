@@ -27,6 +27,17 @@ from PIL import Image
 # デフォルトのワーカー数 (CPUコア数、最大8)
 DEFAULT_WORKERS = min(cpu_count(), 8)
 
+# 高解像度画像の閾値 (この高さ以上の画像ではアップスケールをスキップ)
+# --no-upscale オプションで0に設定される
+HIGH_RESOLUTION_THRESHOLD = 1500
+
+
+def set_high_resolution_threshold(value: int) -> None:
+    """高解像度閾値を設定する (--no-upscale オプション用)。"""
+    global HIGH_RESOLUTION_THRESHOLD
+    HIGH_RESOLUTION_THRESHOLD = value
+
+
 # =============================================================================
 # 型定義
 # =============================================================================
@@ -128,6 +139,7 @@ class ProcessingOptions:
     detect_rotation: bool = False
     debug: bool = False
     keep_debug_images: bool = False
+    no_upscale: bool = False
 
 
 # =============================================================================
@@ -305,11 +317,23 @@ def select_optimal_psm(image: np.ndarray) -> int:
 
 
 def upscale_if_needed(
-    image: np.ndarray, min_height: int = 1000
+    image: np.ndarray, min_height: int = 1000, skip_for_high_res: bool = True
 ) -> tuple[np.ndarray, float]:
-    """画像が小さい場合にアップスケールする。"""
+    """画像が小さい場合にアップスケールする。
+
+    Args:
+        image: 入力画像
+        min_height: この高さ未満の画像をアップスケール
+        skip_for_high_res: 高解像度画像でアップスケールをスキップするか
+
+    Returns:
+        (処理後画像, スケール倍率)
+    """
     h, w = image.shape[:2]
     if h <= 0 or w <= 0:
+        return image, 1.0
+    # 高解像度画像ではアップスケールをスキップ
+    if skip_for_high_res and h >= HIGH_RESOLUTION_THRESHOLD:
         return image, 1.0
     if h < min_height:
         scale = min_height / h
@@ -318,11 +342,23 @@ def upscale_if_needed(
 
 
 def upscale_small_ui_elements(
-    image: np.ndarray, min_text_height: int = 32
+    image: np.ndarray, min_text_height: int = 32, skip_for_high_res: bool = True
 ) -> tuple[np.ndarray, float]:
-    """小さいUI要素の認識精度向上のためスケーリングする。"""
+    """小さいUI要素の認識精度向上のためスケーリングする。
+
+    Args:
+        image: 入力画像
+        min_text_height: 目標となる最小テキスト高さ
+        skip_for_high_res: 高解像度画像でアップスケールをスキップするか
+
+    Returns:
+        (処理後画像, スケール倍率)
+    """
     h, w = image.shape[:2]
     if h <= 0 or w <= 0:
+        return image, 1.0
+    # 高解像度画像ではアップスケールをスキップ
+    if skip_for_high_res and h >= HIGH_RESOLUTION_THRESHOLD:
         return image, 1.0
     if h < 100:
         scale = max(2.0, min_text_height / 12)
@@ -975,10 +1011,12 @@ def _retry_element_ocr(
             preprocess_func = PREPROCESS_FUNCTIONS[method_name]
             processed = preprocess_func(region_array, False)
 
-            # 小さい領域はスケールアップ
+            # 小さい領域のみスケールアップ (高解像度画像からの切り出しは十分なサイズがある)
             h = processed.shape[0]
             if 0 < h < 32:
                 processed = upscale_image(processed, 32 / h)
+            elif 32 <= h < 64:
+                processed = upscale_image(processed, 2)
 
             for psm in retry_psms:
                 region_result = execute_ocr(
@@ -1026,13 +1064,20 @@ def _retry_char_element_ocr(
     original_text = elem["text"]
     original_confidence = elem["confidence"]
 
-    # グレースケール変換と高解像度化
+    # グレースケール変換と高解像度化 (高解像度画像ではスキップ)
     if len(region_array.shape) == 3:
         gray = cv2.cvtColor(region_array, cv2.COLOR_RGB2GRAY)
     else:
         gray = region_array
 
-    upscaled = upscale_image(gray, 4)
+    h = gray.shape[0]
+    # 高解像度元画像からの切り出しは十分なサイズがあるためスキップ
+    if h < 64:
+        upscaled = upscale_image(gray, 4)
+    elif h < 128:
+        upscaled = upscale_image(gray, 2)
+    else:
+        upscaled = gray
     sharpened = apply_sharpening(upscaled)
 
     best_text, best_confidence = original_text, original_confidence
@@ -1437,9 +1482,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--text-detection", action="store_true", help="EASTテキスト領域検出"
     )
     parser.add_argument("--max-accuracy", action="store_true", help="最高精度モード")
+    parser.add_argument(
+        "--no-upscale",
+        action="store_true",
+        help="前処理でのアップスケールを完全に無効化 (高解像度画像向け)",
+    )
 
-    # 並列処理オプション
-    parser.add_argument("--parallel", action="store_true", help="並列処理を有効化")
+    # 並列処理オプション (デフォルトで有効)
+    parser.add_argument("--no-parallel", action="store_true", help="並列処理を無効化")
     parser.add_argument(
         "--workers",
         type=int,
@@ -1947,6 +1997,10 @@ def main() -> int:
         if args.psm == "auto":
             args.psm = "3"
 
+    # --no-upscaleの処理 (閾値を0に設定して全画像でアップスケールをスキップ)
+    if args.no_upscale:
+        set_high_resolution_threshold(0)
+
     # 信頼度閾値のバリデーション
     if not (0.0 <= args.min_confidence <= 1.0):
         print(
@@ -1969,7 +2023,7 @@ def main() -> int:
         args.workers = 1
 
     tessdata_dir = resolve_tessdata_dir(args)
-    parallel = args.parallel
+    parallel = not args.no_parallel
     workers = args.workers
 
     # 存在するファイルのみ抽出
