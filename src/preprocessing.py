@@ -252,10 +252,49 @@ def upscale_small_ui_elements(
     return image, 1.0
 
 
-def apply_sharpening(image: np.ndarray, sigma: float = 2.0) -> np.ndarray:
-    """アンシャープマスクでシャープネスを強化する。"""
+def apply_sharpening(
+    image: np.ndarray, sigma: float = 2.0, strength: float = 1.0
+) -> np.ndarray:
+    """アンシャープマスクでシャープネスを強化する。
+
+    Args:
+        image: 入力画像
+        sigma: ガウシアンブラーのシグマ値
+        strength: シャープ化の強度 (1.0が標準、大きいほど強い)
+
+    Returns:
+        シャープ化された画像
+    """
     gaussian = cv2.GaussianBlur(image, (0, 0), sigma)
-    return cv2.addWeighted(image, 2.0, gaussian, -1.0, 0)
+    # strength=1.0 -> addWeighted(image, 2.0, gaussian, -1.0, 0)
+    # strength=1.5 -> addWeighted(image, 2.5, gaussian, -1.5, 0)
+    alpha = 1.0 + strength
+    beta = -strength
+    return cv2.addWeighted(image, alpha, gaussian, beta, 0)
+
+
+def _calculate_sharpening_params(height: int) -> tuple[float, float]:
+    """画像の高さに基づいてシャープ化パラメータを計算する。
+
+    4K (2160p) 以上の高解像度画像では、文字のエッジがぼやけやすいため
+    より強いシャープ化を適用する。
+
+    Args:
+        height: 画像の高さ (ピクセル)
+
+    Returns:
+        (sigma, strength) のタプル
+    """
+    if height >= 2160:  # 4K以上
+        # 4K画像: 強めのシャープ化 (sigma=2.0, strength=1.8)
+        return 2.0, 1.8
+    elif height >= 1440:  # QHD (1440p)
+        return 1.8, 1.5
+    elif height >= 1080:  # FHD (1080p)
+        return 1.5, 1.2
+    else:
+        # 低解像度: 標準のシャープ化
+        return 1.5, 1.0
 
 
 def apply_auto_sharpening(image: np.ndarray) -> np.ndarray:
@@ -263,9 +302,14 @@ def apply_auto_sharpening(image: np.ndarray) -> np.ndarray:
 
     リサイズされた画像の文字ボケを軽減するための処理。
     カラー画像・グレースケール画像の両方に対応。
+    高解像度画像 (4K等) では自動的に強いシャープ化を適用。
     """
     if image is None or image.size == 0:
         return image
+
+    # 画像の高さに基づいてシャープ化パラメータを決定
+    height = image.shape[0]
+    sigma, strength = _calculate_sharpening_params(height)
 
     # カラー画像の場合はLチャンネルのみシャープ化 (色ずれ防止)
     if len(image.shape) == 3 and image.shape[2] >= 3:
@@ -274,14 +318,14 @@ def apply_auto_sharpening(image: np.ndarray) -> np.ndarray:
         l_channel, a_channel, b_channel = cv2.split(lab)
 
         # Lチャンネルにシャープ化適用
-        l_sharpened = apply_sharpening(l_channel, sigma=1.5)
+        l_sharpened = apply_sharpening(l_channel, sigma=sigma, strength=strength)
 
         # 再結合
         lab_sharpened = cv2.merge([l_sharpened, a_channel, b_channel])
         return cv2.cvtColor(lab_sharpened, cv2.COLOR_LAB2BGR)
     else:
         # グレースケール画像
-        return apply_sharpening(image, sigma=1.5)
+        return apply_sharpening(image, sigma=sigma, strength=strength)
 
 
 def preprocess_image_screenshot(

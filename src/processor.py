@@ -290,10 +290,13 @@ def process_image(
 
         # シャープ化画像の保存
         if args.save_sharpened:
-            sharpened_path = image_path.parent / f"{image_path.name}.sharpened.png"
-            cv2.imwrite(
-                str(sharpened_path), cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-            )
+            sharpened_path = image_path.with_suffix(".sharpened.png")
+            if len(image_array.shape) == 3:
+                cv2.imwrite(
+                    str(sharpened_path), cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                )
+            else:
+                cv2.imwrite(str(sharpened_path), image_array)
             print(f"シャープ化画像を保存しました: {sharpened_path}")
 
         # PSMのバリデーション (0-13の範囲)
@@ -533,7 +536,7 @@ def run_regions_only_mode(
 
             # シャープ化画像の保存
             if args.save_sharpened:
-                sharpened_path = image_path.parent / f"{image_path.name}.sharpened.png"
+                sharpened_path = image_path.with_suffix(".sharpened.png")
                 if len(image_array.shape) == 3:
                     cv2.imwrite(
                         str(sharpened_path),
